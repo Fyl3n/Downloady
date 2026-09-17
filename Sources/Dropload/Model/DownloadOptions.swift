@@ -111,6 +111,21 @@ public struct DownloadOptions: Codable, Equatable, Sendable {
         return copy
     }
 
+    /// What the pickers will produce, in plain words, e.g.
+    /// "1080p mp4 with m4a audio" or "mp3 audio only".
+    public var summary: String {
+        let options = normalized
+        let audio = options.audio == .best ? "the best" : options.audio.rawValue
+        switch options.quality {
+        case .audioOnly:
+            return options.audio == .best ? "Best audio only" : "\(options.audio.rawValue) audio only"
+        case .best:
+            return "Best quality \(options.container.rawValue) with \(audio) audio"
+        default:
+            return "\(options.quality.title) \(options.container.rawValue) with \(audio) audio"
+        }
+    }
+
     /// The `-f` format selector.
     public var formatSelector: String {
         let options = normalized

@@ -42,6 +42,9 @@ public final class DownloadModel: ObservableObject {
     @Published public private(set) var urlWasTyped = false
     @Published public var options = DownloadOptions() {
         didSet {
+            // An audio format the container cannot hold falls back to best.
+            let normalized = options.normalized
+            if normalized != options { options = normalized }
             guard options != oldValue else { return }
             host?.preferences.setValue(options, forKey: PreferenceKey.options)
         }
@@ -52,6 +55,10 @@ public final class DownloadModel: ObservableObject {
         didSet {
             if case .installing = toolStatus { return }
             detectedFFmpeg = toolStatus.ffmpeg ?? tools?.locateFFmpeg()
+            // A link typed before yt-dlp was ready is looked up now.
+            if toolStatus.isReady, !oldValue.isReady, phase == .idle, !urlText.isEmpty {
+                fetchInfo()
+            }
         }
     }
     /// ffmpeg as Settings shows it: from `toolStatus` when ready, otherwise
@@ -67,6 +74,12 @@ public final class DownloadModel: ObservableObject {
     private var ytDlp: YtDlpRunning?
     private var browser: BrowserURLProviding?
     private var work: Task<Void, Never>?
+    private var infoTask: Task<Void, Never>?
+    /// The metadata of the URL in the bar, kept while a download runs so
+    /// cancelling returns to `.ready`.
+    @Published public private(set) var info: MediaInfo?
+    /// How long typing has to pause before the URL is looked up.
+    var fetchDebounce: Duration = .milliseconds(600)
     private var toolTask: Task<Void, Never>?
 
     public init() {}
@@ -107,12 +120,15 @@ public final class DownloadModel: ObservableObject {
     func stop() {
         work?.cancel()
         work = nil
+        infoTask?.cancel()
+        infoTask = nil
         toolTask?.cancel()
         toolTask = nil
         isUpdatingTools = false
         ytDlp?.cancelAll()
         browser?.stop()
         _ = host?.shelf.setHoldsOpen(false)
+        if isBusy { phase = info.map(Phase.ready) ?? .idle }
         tools = nil
         ytDlp = nil
         browser = nil
@@ -125,9 +141,19 @@ public final class DownloadModel: ObservableObject {
     public func userEditedURL(_ text: String) {
         urlText = text
         urlWasTyped = !text.isEmpty
+        guard !isDownloading else { return }
+        infoTask?.cancel()
+        infoTask = nil
+        info = nil
         phase = .idle
         availability = .unrestricted
-        // TODO(T2): debounce, then `fetchInfo()`.
+        guard Self.webURL(from: text) != nil else { return }
+        let delay = fetchDebounce
+        infoTask = Task { [weak self] in
+            try? await Task.sleep(for: delay)
+            guard !Task.isCancelled else { return }
+            self?.fetchInfo()
+        }
     }
 
     /// The browser provider saw a new URL.
@@ -137,16 +163,143 @@ public final class DownloadModel: ObservableObject {
         // TODO(T3): fetch info; if `.unsupported`, clear the bar again.
     }
 
-    /// TODO(T2): run `ytDlp.fetchInfo`, set `phase` to `.ready` / `.unsupported`
-    /// / `.failed`, derive `availability`, and fold `options` into it.
-    public func fetchInfo() {}
+    /// Looks up the URL in the bar with `yt-dlp -J`: `.fetchingInfo`, then
+    /// `.ready`, `.unsupported` or `.failed`. Narrows `availability` and steps
+    /// the quality down when the source cannot reach it.
+    public func fetchInfo() {
+        guard !isDownloading, let url = Self.webURL(from: urlText) else { return }
+        guard let ytDlp, toolStatus.isReady else { return }
+        infoTask?.cancel()
+        let requested = urlText
+        phase = .fetchingInfo
+        infoTask = Task { [weak self] in
+            let outcome: Result<MediaInfo, Error>
+            do {
+                outcome = .success(try await ytDlp.fetchInfo(for: url))
+            } catch {
+                outcome = .failure(error)
+            }
+            guard let self, !Task.isCancelled, self.urlText == requested, !self.isDownloading else { return }
+            self.infoTask = nil
+            self.applyInfo(outcome)
+        }
+    }
 
-    /// TODO(T2): run the download into the download folder, map events to
-    /// `phase`, hold the shelf open while it runs, reveal the file at the end.
-    public func startDownload() {}
+    func applyInfo(_ outcome: Result<MediaInfo, Error>) {
+        switch outcome {
+        case .success(let fetched):
+            self.info = fetched
+            let availability = FormatAvailability(info: fetched)
+            self.availability = availability
+            let quality = availability.fallback(for: options.quality)
+            if quality != options.quality { options.quality = quality }
+            phase = .ready(fetched)
+        case .failure(YtDlpError.unsupportedURL):
+            info = nil
+            availability = .unrestricted
+            phase = .unsupported
+        case .failure(YtDlpError.cancelled), .failure(is CancellationError):
+            break
+        case .failure(let error):
+            info = nil
+            availability = .unrestricted
+            phase = .failed(error.localizedDescription)
+        }
+    }
 
-    /// TODO(T2): cancel the download task and the process.
-    public func cancelDownload() {}
+    /// Downloads the URL in the bar into `downloadFolder`, holding the shelf
+    /// open while it runs.
+    public func startDownload() {
+        guard canDownload, let ytDlp, let host, let url = Self.webURL(from: urlText) else { return }
+        let folder = downloadFolder
+        guard Self.isWritableFolder(folder) else {
+            phase = .failed("Dropload cannot write to \(folder.path)")
+            return
+        }
+        infoTask?.cancel()
+        infoTask = nil
+        work?.cancel()
+        _ = host.shelf.setHoldsOpen(true)
+        phase = .downloading(fraction: 0, speed: nil, eta: nil)
+        let events = ytDlp.download(url, options: options, into: folder)
+        work = Task { [weak self] in
+            var finalFile: URL?
+            var failure: Error?
+            do {
+                for try await event in events {
+                    guard let self, !Task.isCancelled else { return }
+                    switch event {
+                    case .progress(let fraction, let speed, let eta):
+                        self.phase = .downloading(fraction: fraction, speed: speed, eta: eta)
+                    case .postProcessing:
+                        self.phase = .postProcessing
+                    case .finished(let file):
+                        finalFile = file
+                    }
+                }
+            } catch {
+                failure = error
+            }
+            guard let self, !Task.isCancelled else { return }
+            self.work = nil
+            _ = self.host?.shelf.setHoldsOpen(false)
+            if let finalFile {
+                self.phase = .finished(finalFile)
+            } else if let failure, failure as? YtDlpError != .cancelled {
+                self.phase = .failed(failure.localizedDescription)
+            } else {
+                self.phase = self.info.map(Phase.ready) ?? .idle
+            }
+        }
+    }
+
+    /// Stops the running download and goes back to the ready state.
+    public func cancelDownload() {
+        guard isBusy else { return }
+        work?.cancel()
+        work = nil
+        ytDlp?.cancelAll()
+        _ = host?.shelf.setHoldsOpen(false)
+        phase = info.map(Phase.ready) ?? .idle
+    }
+
+    /// Shows the downloaded file in Finder.
+    public func revealDownloadedFile() {
+        guard case .finished(let file) = phase else { return }
+        host?.workspace.revealInFinder(file)
+    }
+
+    /// Replaces the bar with the pasteboard's text, when it holds a web link.
+    public func pasteURL(_ text: String?) {
+        guard let text = text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return }
+        userEditedURL(text)
+    }
+
+    private var isDownloading: Bool {
+        switch phase {
+        case .downloading, .postProcessing: true
+        default: false
+        }
+    }
+
+    /// A download is running (or winding down).
+    public var isBusy: Bool { isDownloading || work != nil }
+
+    static func webURL(from text: String) -> URL? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: trimmed),
+              let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
+              url.host?.isEmpty == false
+        else { return nil }
+        return url
+    }
+
+    static func isWritableFolder(_ folder: URL) -> Bool {
+        var isDirectory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: folder.path, isDirectory: &isDirectory)
+            && isDirectory.boolValue
+            && FileManager.default.isWritableFile(atPath: folder.path)
+    }
 
     /// Downloads the missing tools, driving `toolStatus` through
     /// `.installing(progress:)` to `.ready` or `.failed`.
@@ -236,6 +389,25 @@ public final class DownloadModel: ObservableObject {
             ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Downloads")
     }
 
+    /// Stores a new download folder. Returns `false` (and keeps the old one)
+    /// when Dropload cannot write there.
+    @discardableResult
+    public func setDownloadFolder(_ folder: URL) -> Bool {
+        guard Self.isWritableFolder(folder) else {
+            downloadFolderMessage = "Dropload cannot write to \(folder.lastPathComponent)"
+            return false
+        }
+        host?.preferences.setValue(folder.path, forKey: PreferenceKey.downloadFolder)
+        downloadFolderMessage = nil
+        objectWillChange.send()
+        return true
+    }
+
+    /// Why the last folder choice was refused, for Settings.
+    @Published public private(set) var downloadFolderMessage: String?
+
+    public var downloadFolderIsWritable: Bool { Self.isWritableFolder(downloadFolder) }
+
     public var autoFillFromBrowser: Bool {
         get { host?.preferences.value(forKey: PreferenceKey.autoFillFromBrowser, default: true) ?? true }
         set {
@@ -264,7 +436,7 @@ public final class DownloadModel: ObservableObject {
     }
 
     public var canDownload: Bool {
-        guard toolStatus.isReady, URL(string: urlText)?.scheme?.hasPrefix("http") == true else { return false }
+        guard toolStatus.isReady, Self.webURL(from: urlText) != nil, work == nil else { return false }
         switch phase {
         case .downloading, .postProcessing, .fetchingInfo, .unsupported: return false
         default: return true

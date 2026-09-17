@@ -5,10 +5,10 @@
 //  Settings, built from DroppyKit's settings rows.
 //
 
+import AppKit
 import DroppyKit
 import SwiftUI
 
-/// TODO(T2): download folder picker (NSOpenPanel), default options.
 /// TODO(T3): browser auto-fill toggle, Automation permission status with
 /// `host.permissions.openSystemSettings(for: .appleEvents)`, list of
 /// supported browsers.
@@ -19,11 +19,7 @@ struct DroploadSettingsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: DroppySpacing.lg) {
             ToolsCard(model: model)
-            DropletSettingsCard {
-                DropletControlRow(title: "Download folder") {
-                    DropletValuePill(text: model.downloadFolder.lastPathComponent)
-                }
-            }
+            DownloadsCard(model: model)
             DropletSettingsCard {
                 DropletToggleRow(
                     title: "Fill in the link from your browser",
@@ -149,5 +145,66 @@ struct ToolsCard: View {
                     .fill(AdaptiveColors.overlayAuto(0.08))
             )
             .onSubmit(commit)
+    }
+}
+
+/// Where downloads land and what the pickers start on.
+struct DownloadsCard: View {
+    @ObservedObject var model: DownloadModel
+
+    var body: some View {
+        DropletSettingsCard {
+            DropletControlRow(
+                title: "Download folder",
+                icon: "folder",
+                infoTip: folderTip
+            ) {
+                HStack(spacing: DroppySpacing.xsm) {
+                    if !model.downloadFolderIsWritable || model.downloadFolderMessage != nil {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Color(nsColor: .systemOrange))
+                            .help(folderTip)
+                    }
+                    DropletValuePill(text: model.downloadFolder.lastPathComponent)
+                    Button("Choose…") { chooseFolder() }
+                        .buttonStyle(DroppyQuietButtonStyle(size: .small))
+                }
+            }
+            DropletSettingsDivider()
+            DropletStackedRow(
+                title: "Format",
+                icon: "slider.horizontal.3",
+                infoTip: "Quality, video container and audio format. The shelf widget uses the same choice."
+            ) {
+                VStack(alignment: .leading, spacing: DroppySpacing.xs) {
+                    FormatPickers(model: model)
+                    Text(model.options.summary)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private var folderTip: String {
+        if let message = model.downloadFolderMessage { return message }
+        if !model.downloadFolderIsWritable { return "Dropload cannot write to \(model.downloadFolder.path)" }
+        return model.downloadFolder.path
+    }
+
+    private func chooseFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = model.downloadFolder
+        panel.prompt = "Choose"
+        panel.message = "Choose where Dropload saves downloads"
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            Task { @MainActor in model.setDownloadFolder(url) }
+        }
     }
 }

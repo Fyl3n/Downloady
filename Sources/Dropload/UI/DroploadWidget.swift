@@ -3,7 +3,7 @@
 //  Dropload
 //
 //  The shelf widget. Solo: URL bar, pickers, action row. Paired: URL bar and
-//  the download button. Branch on `context.isPaired`, never on a width.
+//  a single download/progress control. Branch on `context.isPaired`, never on a width.
 //
 
 import DroppyKit
@@ -22,10 +22,8 @@ struct DroploadWidget: View {
                 FormatPickers(model: model)
             }
             Spacer(minLength: 0)
-            // TODO(T2): progress bar, speed and ETA while downloading; a
-            // "Show in Finder" action when finished; the error when failed.
             if model.toolStatus.isReady {
-                actionRow
+                DownloadActionRow(model: model, compact: context.isPaired)
             } else {
                 ToolInstallRow(model: model)
             }
@@ -52,23 +50,6 @@ struct DroploadWidget: View {
             }
         }
         .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
-    }
-
-    private var actionRow: some View {
-        HStack(spacing: DroppySpacing.xsm) {
-            Text(statusText)
-                .font(.system(size: 11))
-                .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
-                .lineLimit(1)
-            Spacer(minLength: 0)
-            Button("Download") { model.startDownload() }
-                .buttonStyle(DroppyAccentButtonStyle(size: .small))
-                .disabled(!model.canDownload)
-        }
-    }
-
-    private var statusText: String {
-        model.urlText.isEmpty ? "Paste a link to start" : ""
     }
 }
 
@@ -131,6 +112,7 @@ struct ToolInstallRow: View {
 /// A thin determinate bar.
 struct ToolProgressBar: View {
     let fraction: Double
+    var label = "Install progress"
 
     var body: some View {
         GeometryReader { proxy in
@@ -145,7 +127,7 @@ struct ToolProgressBar: View {
         .frame(height: 4)
         .animation(DroppyAnimation.state, value: fraction)
         .accessibilityElement()
-        .accessibilityLabel("Install progress")
+        .accessibilityLabel(label)
         .accessibilityValue(Text(fraction, format: .percent.precision(.fractionLength(0))))
     }
 }

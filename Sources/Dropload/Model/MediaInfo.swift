@@ -98,14 +98,72 @@ public struct FormatAvailability: Equatable, Sendable {
 
     /// Derives availability from the formats yt-dlp reported.
     ///
-    /// TODO(T2): implement. Rules to follow:
     /// - A height preset is available when some video format reaches at least
     ///   that height; `best` whenever any video exists; `audioOnly` whenever
-    ///   any audio exists.
+    ///   any audio exists. When no video format reports a height, the height
+    ///   presets stay available (yt-dlp falls back on its own).
     /// - Containers stay available (ffmpeg remuxes), audio formats stay
     ///   available (ffmpeg converts); only qualities are really restricted.
     /// - No formats at all -> `.unrestricted`.
     public init(info: MediaInfo) {
-        self = .unrestricted
+        let formats = (info.formats ?? []).filter { !$0.isStoryboard }
+        guard !formats.isEmpty else {
+            self = .unrestricted
+            return
+        }
+        let video = formats.filter(\.mayHaveVideo)
+        let hasAudio = formats.contains(where: \.mayHaveAudio)
+        let maxHeight = video.compactMap(\.height).max()
+
+        var qualities = Set<DownloadQuality>()
+        if !video.isEmpty {
+            qualities.insert(.best)
+            for quality in DownloadQuality.allCases {
+                guard let height = quality.maxHeight else { continue }
+                if maxHeight.map({ $0 >= height }) ?? true {
+                    qualities.insert(quality)
+                }
+            }
+        }
+        if hasAudio { qualities.insert(.audioOnly) }
+        if qualities.isEmpty {
+            // Nothing recognisable: let yt-dlp decide rather than block everything.
+            qualities = Set(DownloadQuality.allCases)
+        }
+        self.init(
+            qualities: qualities,
+            containers: Set(VideoContainer.allCases),
+            audioFormats: Set(AudioFormat.allCases)
+        )
+    }
+
+    /// The quality to use when `quality` is not available: the next lower
+    /// available one, else the highest available one.
+    public func fallback(for quality: DownloadQuality) -> DownloadQuality {
+        guard !qualities.contains(quality) else { return quality }
+        let order = DownloadQuality.allCases
+        let index = order.firstIndex(of: quality) ?? order.startIndex
+        if let lower = order[index...].first(where: { $0.includesVideo && qualities.contains($0) }) {
+            return lower
+        }
+        return order.first(where: qualities.contains) ?? quality
+    }
+}
+
+extension MediaFormat {
+    /// yt-dlp lists storyboard images as formats; they are neither.
+    var isStoryboard: Bool {
+        ext == "mhtml"
+    }
+
+    /// An unknown codec (`nil`) may still be video; only `"none"` rules it out.
+    var mayHaveVideo: Bool {
+        guard vcodec != "none" else { return false }
+        // A format with no codec info at all and an audio codec is audio.
+        return vcodec != nil || height != nil || acodec == nil
+    }
+
+    var mayHaveAudio: Bool {
+        acodec != "none"
     }
 }
