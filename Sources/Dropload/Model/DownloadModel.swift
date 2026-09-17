@@ -84,6 +84,9 @@ public final class DownloadModel: ObservableObject {
     /// Whether yt-dlp could handle a URL, for the last 50 URLs seen.
     private var verdicts = VerdictCache(capacity: 50)
     private var work: Task<Void, Never>?
+    /// Files yt-dlp said it was writing, so a cancelled download can take its
+    /// half-written `.part` files with it instead of leaving them behind.
+    private var destinations: [URL] = []
     private var infoTask: Task<Void, Never>?
     /// The metadata of the URL in the bar, kept while a download runs so
     /// cancelling returns to `.ready`.
@@ -134,6 +137,7 @@ public final class DownloadModel: ObservableObject {
         toolTask = nil
         isUpdatingTools = false
         ytDlp?.cancelAll()
+        removePartialFiles()
         browser?.stop()
         browserIsWatching = false
         browserReadTask?.cancel()
@@ -353,6 +357,7 @@ public final class DownloadModel: ObservableObject {
         infoTask = nil
         work?.cancel()
         _ = host.shelf.setHoldsOpen(true)
+        destinations = []
         phase = .downloading(fraction: 0, speed: nil, eta: nil)
         let events = ytDlp.download(url, options: options, into: folder)
         work = Task { [weak self] in
@@ -362,6 +367,8 @@ public final class DownloadModel: ObservableObject {
                 for try await event in events {
                     guard let self, !Task.isCancelled else { return }
                     switch event {
+                    case .destination(let file):
+                        self.destinations.append(file)
                     case .progress(let fraction, let speed, let eta):
                         self.phase = .downloading(fraction: fraction, speed: speed, eta: eta)
                     case .postProcessing:
@@ -377,12 +384,15 @@ public final class DownloadModel: ObservableObject {
             self.work = nil
             _ = self.host?.shelf.setHoldsOpen(false)
             if let finalFile {
+                self.destinations = []
                 self.phase = .finished(finalFile)
                 // Auto-fill picks up the next page again.
                 self.urlWasTyped = false
             } else if let failure, failure as? YtDlpError != .cancelled {
+                self.removePartialFiles()
                 self.phase = .failed(failure.localizedDescription)
             } else {
+                self.removePartialFiles()
                 self.phase = self.info.map(Phase.ready) ?? .idle
             }
         }
@@ -395,7 +405,25 @@ public final class DownloadModel: ObservableObject {
         work = nil
         ytDlp?.cancelAll()
         _ = host?.shelf.setHoldsOpen(false)
+        removePartialFiles()
         phase = info.map(Phase.ready) ?? .idle
+    }
+
+    /// Clears the `.part` files the stopped download left in the folder.
+    ///
+    /// Only the sidecars of the paths yt-dlp itself announced, never a path
+    /// Dropload guessed at, and never a finished stream: a cancelled download
+    /// should not leave a growing pile in the user's Downloads folder, and it
+    /// should not take anything else with it either.
+    private func removePartialFiles() {
+        let files = destinations.flatMap(YtDlpClient.partialFiles(for:))
+        destinations = []
+        guard !files.isEmpty else { return }
+        Task.detached(priority: .utility) {
+            for file in files {
+                try? FileManager.default.removeItem(at: file)
+            }
+        }
     }
 
     /// Shows the downloaded file in Finder.

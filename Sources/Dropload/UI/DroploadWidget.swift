@@ -10,6 +10,13 @@ import DroppyKit
 import SwiftUI
 
 struct DroploadWidget: View {
+    /// The rectangle the widget asks the shelf for, measured off the solo
+    /// stack: the header row (15), the URL bar (28), the pickers (20) and the
+    /// action row (25), with a `DroppySpacing.sm` step between them. The
+    /// paired composition drops the pickers and needs less, but a widget
+    /// declares one height for both.
+    static let soloContentHeight: CGFloat = 15 + 28 + 20 + 25 + 3 * DroppySpacing.sm
+
     let droplet: DroploadDroplet
     @ObservedObject var model: DownloadModel
     let context: ShelfWidgetContext

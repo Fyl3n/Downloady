@@ -10,6 +10,14 @@ import DroppyKit
 import SwiftUI
 
 struct DroploadDetailView: View {
+    /// What `expandedSurfaceSize` asks the host for: the URL bar, the media
+    /// summary, the pickers, the options line and the action row, with a
+    /// `DroppySpacing.md` step between them, inside `DroppySpacing.lg`.
+    /// 204: the stack below and nothing more, read off the shots. The host
+    /// draws whatever this asks for, so a number larger than the content
+    /// leaves empty surface under the last row.
+    static let contentHeight: CGFloat = 204
+
     let droplet: DroploadDroplet
     @ObservedObject var model: DownloadModel
     let context: ExpandedSurfaceContext

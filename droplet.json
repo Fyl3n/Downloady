@@ -12,14 +12,18 @@
   "minAppVersion": "15.3.0",
   "capabilities": [
     "expanded-surface",
+    "shelf-read",
     "shelf-write",
+    "hud",
     "network-client",
     "downloads",
     "apple-events"
   ],
   "surfaces": [
     "shelf-widget",
+    "live-activity",
     "expanded-surface",
+    "hud",
     "settings-pane"
   ],
   "icon": "Dropload.icon",

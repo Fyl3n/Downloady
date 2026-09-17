@@ -13,6 +13,9 @@ import Foundation
 public enum DownloadEvent: Equatable, Sendable {
     /// 0...1, with speed and ETA as yt-dlp formats them.
     case progress(fraction: Double, speed: String?, eta: String?)
+    /// A file yt-dlp is about to write. Cancelling leaves a `.part` beside
+    /// it, which is what makes the cleanup possible.
+    case destination(URL)
     /// yt-dlp moved on to merging, extracting or remuxing.
     case postProcessing
     /// The final file.
@@ -58,6 +61,9 @@ public enum YtDlpCommand {
         "download:dropload %(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s"
     public static let outputTemplate = "%(title).200B [%(id)s].%(ext)s"
 
+    /// The line yt-dlp prints before it writes a stream.
+    static let destinationPrefix = "[download] Destination: "
+
     /// Lines yt-dlp prints when a post-processor starts.
     static let postProcessorPrefixes = ["[Merger]", "[ExtractAudio]", "[VideoRemuxer]"]
 
@@ -91,6 +97,10 @@ public enum YtDlpCommand {
     /// path is the `--print after_move:filepath` line.
     public static func event(forLine line: String) -> DownloadEvent? {
         if let progress = ProgressParser.parse(line) { return progress }
+        if line.hasPrefix(destinationPrefix) {
+            let path = line.dropFirst(destinationPrefix.count).trimmingCharacters(in: .whitespaces)
+            return path.hasPrefix("/") ? .destination(URL(fileURLWithPath: path)) : nil
+        }
         if postProcessorPrefixes.contains(where: line.hasPrefix) { return .postProcessing }
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.hasPrefix("/") {
@@ -352,6 +362,16 @@ public final class YtDlpClient: YtDlpRunning {
                 }
             })
         }
+    }
+
+    /// The half-written files a cancelled download leaves beside `destination`.
+    ///
+    /// Only the two yt-dlp names for "not finished": a `.part` and its
+    /// resume index. The destination itself is never touched — by the time it
+    /// exists it is a complete stream, and guessing is how a cleanup deletes
+    /// something it did not write.
+    nonisolated public static func partialFiles(for destination: URL) -> [URL] {
+        ["part", "ytdl"].map { destination.appendingPathExtension($0) }
     }
 
     public func cancelAll() {

@@ -57,6 +57,23 @@ import Testing
         #expect(YtDlpCommand.event(forLine: "Deleting original file /tmp/a.webm") == nil)
     }
 
+    @Test func readsTheDestinationLine() {
+        #expect(YtDlpCommand.event(forLine: "[download] Destination: /tmp/Me at the zoo [id].f401.mp4")
+            == .destination(URL(fileURLWithPath: "/tmp/Me at the zoo [id].f401.mp4")))
+        // A relative path is not one Dropload would know how to clean up.
+        #expect(YtDlpCommand.event(forLine: "[download] Destination: a.mp4") == nil)
+    }
+
+    @Test func partialFilesAreOnlyTheSidecars() {
+        let destination = URL(fileURLWithPath: "/tmp/Me at the zoo [id].f401.mp4")
+        let partials = YtDlpClient.partialFiles(for: destination)
+        #expect(partials.map(\.path) == [
+            "/tmp/Me at the zoo [id].f401.mp4.part",
+            "/tmp/Me at the zoo [id].f401.mp4.ytdl",
+        ])
+        #expect(!partials.contains(destination))
+    }
+
     @Test func picksTheErrorLine() {
         let stderr = "WARNING: [generic] Falling back\nERROR: Unsupported URL: https://example.com/\n"
         #expect(YtDlpCommand.errorMessage(fromStderr: stderr) == "Unsupported URL: https://example.com/")
@@ -131,9 +148,14 @@ struct YtDlpClientNetworkTests {
         let long = URL(string: "https://www.youtube.com/watch?v=aqz-KE-bpKQ")!
         let stream = client.download(long, options: DownloadOptions(quality: .best, container: .mkv), into: folder)
         let started = AsyncStream<Void>.makeStream()
+        let seen = DestinationBox()
         let task = Task {
             for try await event in stream {
-                if case .progress = event { started.continuation.yield() }
+                switch event {
+                case .destination(let file): await seen.append(file)
+                case .progress: started.continuation.yield()
+                default: break
+                }
             }
         }
         for await _ in started.stream { break }
@@ -142,8 +164,21 @@ struct YtDlpClientNetworkTests {
         _ = try? await task.value
         try await Task.sleep(for: .seconds(3))
         #expect(Self.runningYtDlp() == 0)
+        // What the model deletes when the user presses Cancel: the sidecars
+        // of the paths yt-dlp announced. Nothing else may be left behind.
+        let destinations = await seen.files
+        #expect(!destinations.isEmpty)
+        for file in destinations.flatMap(YtDlpClient.partialFiles(for:)) {
+            try? FileManager.default.removeItem(at: file)
+        }
         let leftovers = (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []
-        print("left in folder after cancel:", leftovers)
+        #expect(leftovers.isEmpty, "left behind: \(leftovers)")
+    }
+
+    /// Collects destinations off the stream's task.
+    private actor DestinationBox {
+        var files: [URL] = []
+        func append(_ file: URL) { files.append(file) }
     }
 
     @Test func cancelAllTerminatesAFetch() async throws {
