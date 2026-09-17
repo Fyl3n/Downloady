@@ -22,11 +22,13 @@ struct DroploadWidget: View {
                 FormatPickers(model: model)
             }
             Spacer(minLength: 0)
-            // TODO(T1): when tools are not ready, replace the action row with an
-            // "Install yt-dlp" row driving `model.installTools()`.
             // TODO(T2): progress bar, speed and ETA while downloading; a
             // "Show in Finder" action when finished; the error when failed.
-            actionRow
+            if model.toolStatus.isReady {
+                actionRow
+            } else {
+                ToolInstallRow(model: model)
+            }
         }
         .padding(context.contentInsets)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -66,12 +68,84 @@ struct DroploadWidget: View {
     }
 
     private var statusText: String {
-        switch model.toolStatus {
-        case .unknown: "Checking yt-dlp…"
-        case .missing: "yt-dlp is not installed"
-        case .installing: "Installing yt-dlp…"
-        case .failed(let message): message
-        case .ready: model.urlText.isEmpty ? "Paste a link to start" : ""
+        model.urlText.isEmpty ? "Paste a link to start" : ""
+    }
+}
+
+/// Stands in for the action row until yt-dlp is ready: what is missing, an
+/// Install button, and a progress bar while it installs.
+struct ToolInstallRow: View {
+    @ObservedObject var model: DownloadModel
+
+    var body: some View {
+        Group {
+            if case .installing(let progress) = model.toolStatus {
+                VStack(alignment: .leading, spacing: DroppySpacing.xs) {
+                    HStack(spacing: DroppySpacing.xsm) {
+                        Text("Installing yt-dlp…")
+                            .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+                        Spacer(minLength: 0)
+                        Text(progress, format: .percent.precision(.fractionLength(0)))
+                            .monospacedDigit()
+                            .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+                    }
+                    .font(.system(size: 11))
+                    ToolProgressBar(fraction: progress)
+                }
+                .transition(DroppyTransition.element)
+            } else {
+                HStack(spacing: DroppySpacing.xsm) {
+                    Text(message)
+                        .font(.system(size: 11))
+                        .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+                        .lineLimit(1)
+                        .help(message)
+                    Spacer(minLength: 0)
+                    if showsInstall {
+                        Button("Install") { model.installTools() }
+                            .buttonStyle(DroppyAccentButtonStyle(size: .small))
+                    }
+                }
+                .transition(DroppyTransition.element)
+            }
         }
+        .animation(DroppyAnimation.state, value: model.toolStatus)
+    }
+
+    private var message: String {
+        switch model.toolStatus {
+        case .failed(let reason): reason
+        case .unknown: "Checking yt-dlp…"
+        default: "yt-dlp is needed"
+        }
+    }
+
+    private var showsInstall: Bool {
+        switch model.toolStatus {
+        case .missing, .failed: true
+        default: false
+        }
+    }
+}
+
+/// A thin determinate bar.
+struct ToolProgressBar: View {
+    let fraction: Double
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack(alignment: .leading) {
+                Capsule(style: .continuous)
+                    .fill(AdaptiveColors.notchSurfaceCardFill)
+                Capsule(style: .continuous)
+                    .fill(AdaptiveColors.selectionBlueAuto)
+                    .frame(width: proxy.size.width * min(max(fraction, 0), 1))
+            }
+        }
+        .frame(height: 4)
+        .animation(DroppyAnimation.state, value: fraction)
+        .accessibilityElement()
+        .accessibilityLabel("Install progress")
+        .accessibilityValue(Text(fraction, format: .percent.precision(.fractionLength(0))))
     }
 }

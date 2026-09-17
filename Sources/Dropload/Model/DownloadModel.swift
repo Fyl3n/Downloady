@@ -18,6 +18,9 @@ public enum PreferenceKey {
     public static let autoFillFromBrowser = "autoFillFromBrowser"
     public static let customYtDlpPath = "customYtDlpPath"
     public static let customFFmpegPath = "customFFmpegPath"
+    /// Set once the user pressed Install; from then on a missing yt-dlp is
+    /// reinstalled on activation without asking again.
+    public static let toolsInstallRequested = "toolsInstallRequested"
 }
 
 @MainActor
@@ -45,13 +48,26 @@ public final class DownloadModel: ObservableObject {
     }
     @Published public private(set) var availability = FormatAvailability.unrestricted
     @Published public private(set) var phase: Phase = .idle
-    @Published public private(set) var toolStatus: ToolStatus = .unknown
+    @Published public private(set) var toolStatus: ToolStatus = .unknown {
+        didSet {
+            if case .installing = toolStatus { return }
+            detectedFFmpeg = toolStatus.ffmpeg ?? tools?.locateFFmpeg()
+        }
+    }
+    /// ffmpeg as Settings shows it: from `toolStatus` when ready, otherwise
+    /// looked up on its own so a missing yt-dlp does not hide it.
+    @Published public private(set) var detectedFFmpeg: ToolLocation?
+    /// An update check is running.
+    @Published public private(set) var isUpdatingTools = false
+    /// The outcome of the last update check, for Settings.
+    @Published public private(set) var toolUpdateMessage: String?
 
     private var host: DropletHost?
     private var tools: ToolManaging?
     private var ytDlp: YtDlpRunning?
     private var browser: BrowserURLProviding?
     private var work: Task<Void, Never>?
+    private var toolTask: Task<Void, Never>?
 
     public init() {}
 
@@ -62,14 +78,26 @@ public final class DownloadModel: ObservableObject {
         options = host.preferences.value(forKey: PreferenceKey.options, default: DownloadOptions())
 
         let logger = host.log
-        let tools = ToolManager(containerDirectory: host.environment.containerDirectory) { logger.info($0) }
+        let tools = ToolManager(
+            containerDirectory: host.environment.containerDirectory,
+            customPaths: { [weak self] in (self?.customYtDlpPath, self?.customFFmpegPath) },
+            networkGranted: { [weak self] in self?.canUseNetwork ?? false },
+            log: { logger.info($0) }
+        )
         self.tools = tools
         self.ytDlp = YtDlpClient(tools: { [weak self] in self?.toolStatus ?? .unknown }) { logger.info($0) }
         self.browser = BrowserURLProvider { logger.info($0) }
 
-        work = Task { [weak self] in
+        let installRequested = host.preferences.value(forKey: PreferenceKey.toolsInstallRequested, default: false)
+        toolTask = Task { [weak self] in
             let status = await tools.resolve()
-            self?.toolStatus = status
+            guard let self, !Task.isCancelled else { return }
+            self.toolStatus = status
+            self.toolTask = nil
+            // Never download silently the first time: only once the user asked.
+            if status == .missing, installRequested {
+                self.installTools()
+            }
         }
 
         // TODO(T3): start the browser provider when `autoFillFromBrowser` is on
@@ -79,6 +107,9 @@ public final class DownloadModel: ObservableObject {
     func stop() {
         work?.cancel()
         work = nil
+        toolTask?.cancel()
+        toolTask = nil
+        isUpdatingTools = false
         ytDlp?.cancelAll()
         browser?.stop()
         _ = host?.shelf.setHoldsOpen(false)
@@ -117,8 +148,82 @@ public final class DownloadModel: ObservableObject {
     /// TODO(T2): cancel the download task and the process.
     public func cancelDownload() {}
 
-    /// TODO(T1): run `tools.installMissing`, driving `toolStatus`.
-    public func installTools() {}
+    /// Downloads the missing tools, driving `toolStatus` through
+    /// `.installing(progress:)` to `.ready` or `.failed`.
+    public func installTools() {
+        guard let tools, let host, toolTask == nil else { return }
+        host.preferences.setValue(true, forKey: PreferenceKey.toolsInstallRequested)
+        guard canUseNetwork else {
+            toolStatus = .failed("Allow network access and downloads for Dropload")
+            return
+        }
+        toolUpdateMessage = nil
+        toolStatus = .installing(progress: 0)
+        toolTask = Task { [weak self] in
+            let result: ToolStatus
+            do {
+                result = try await tools.installMissing { fraction in
+                    // Late progress hops must not overwrite the final status.
+                    guard let self, case .installing = self.toolStatus else { return }
+                    self.toolStatus = .installing(progress: fraction)
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                result = .failed(error.localizedDescription)
+            }
+            guard let self, !Task.isCancelled else { return }
+            self.toolStatus = result
+            self.toolTask = nil
+        }
+    }
+
+    /// Reinstalls the managed yt-dlp when GitHub has a newer release.
+    public func updateYtDlp() {
+        guard let tools, toolTask == nil else { return }
+        guard canUseNetwork else {
+            toolUpdateMessage = "Allow network access and downloads for Dropload"
+            return
+        }
+        let before = toolStatus.ytDlp?.version
+        isUpdatingTools = true
+        toolUpdateMessage = nil
+        toolTask = Task { [weak self] in
+            var message: String?
+            var result: ToolStatus?
+            do {
+                let status = try await tools.updateYtDlp()
+                result = status
+                let after = status.ytDlp?.version
+                message = after == before ? "Up to date" : "Updated to \(after ?? "the latest release")"
+            } catch is CancellationError {
+                return
+            } catch {
+                message = error.localizedDescription
+            }
+            guard let self, !Task.isCancelled else { return }
+            if let result { self.toolStatus = result }
+            self.toolUpdateMessage = message
+            self.isUpdatingTools = false
+            self.toolTask = nil
+        }
+    }
+
+    /// Looks the tools up again, e.g. after a custom path changed.
+    public func refreshTools() {
+        guard let tools, toolTask == nil else { return }
+        toolTask = Task { [weak self] in
+            let status = await tools.resolve()
+            guard let self, !Task.isCancelled else { return }
+            self.toolStatus = status
+            self.toolTask = nil
+        }
+    }
+
+    private var canUseNetwork: Bool {
+        guard let host else { return false }
+        return host.isGranted(.networkClient) && host.isGranted(.downloads)
+    }
 
     // MARK: Settings
 
@@ -137,6 +242,25 @@ public final class DownloadModel: ObservableObject {
             host?.preferences.setValue(newValue, forKey: PreferenceKey.autoFillFromBrowser)
             objectWillChange.send()
         }
+    }
+
+    public var customYtDlpPath: String? {
+        get { host?.preferences.value(forKey: PreferenceKey.customYtDlpPath, as: String.self) }
+        set { setCustomPath(newValue, forKey: PreferenceKey.customYtDlpPath) }
+    }
+
+    public var customFFmpegPath: String? {
+        get { host?.preferences.value(forKey: PreferenceKey.customFFmpegPath, as: String.self) }
+        set { setCustomPath(newValue, forKey: PreferenceKey.customFFmpegPath) }
+    }
+
+    private func setCustomPath(_ path: String?, forKey key: String) {
+        let trimmed = path?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let value = trimmed?.isEmpty == false ? trimmed : nil
+        guard value != host?.preferences.value(forKey: key, as: String.self) else { return }
+        host?.preferences.setValue(value, forKey: key)
+        objectWillChange.send()
+        refreshTools()
     }
 
     public var canDownload: Bool {

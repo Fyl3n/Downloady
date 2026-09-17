@@ -8,8 +8,6 @@
 import DroppyKit
 import SwiftUI
 
-/// TODO(T1): tools card — yt-dlp version and source, "Install" / "Update"
-/// buttons, ffmpeg source (system / downloaded / custom path).
 /// TODO(T2): download folder picker (NSOpenPanel), default options.
 /// TODO(T3): browser auto-fill toggle, Automation permission status with
 /// `host.permissions.openSystemSettings(for: .appleEvents)`, list of
@@ -20,11 +18,8 @@ struct DroploadSettingsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: DroppySpacing.lg) {
+            ToolsCard(model: model)
             DropletSettingsCard {
-                DropletControlRow(title: "yt-dlp") {
-                    DropletValuePill(text: model.toolStatus.isReady ? "Ready" : "Not installed")
-                }
-                DropletSettingsDivider()
                 DropletControlRow(title: "Download folder") {
                     DropletValuePill(text: model.downloadFolder.lastPathComponent)
                 }
@@ -37,5 +32,122 @@ struct DroploadSettingsView: View {
                 )
             }
         }
+    }
+}
+
+/// Where yt-dlp and ffmpeg come from, with Install / Update and the custom
+/// path overrides.
+struct ToolsCard: View {
+    @ObservedObject var model: DownloadModel
+    @State private var ytDlpPath = ""
+    @State private var ffmpegPath = ""
+
+    var body: some View {
+        DropletSettingsCard {
+            DropletControlRow(
+                title: "yt-dlp",
+                icon: "arrow.down.circle",
+                infoTip: model.toolStatus.ytDlp?.url.path ?? model.toolUpdateMessage
+            ) {
+                HStack(spacing: DroppySpacing.xsm) {
+                    if let message = model.toolUpdateMessage {
+                        Text(message)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    ytDlpPills
+                    ytDlpAction
+                }
+            }
+            DropletSettingsDivider()
+            DropletControlRow(
+                title: "ffmpeg",
+                icon: "film",
+                infoTip: model.detectedFFmpeg?.url.path
+                    ?? "Used to merge video and audio and to convert. Install it with Homebrew, or Dropload downloads a copy."
+            ) {
+                HStack(spacing: DroppySpacing.xsm) {
+                    if let version = model.detectedFFmpeg?.version {
+                        DropletValuePill(text: version)
+                    }
+                    DropletValuePill(text: ffmpegSource)
+                }
+            }
+            DropletSettingsDivider()
+            DropletStackedRow(
+                title: "Custom paths",
+                icon: "folder",
+                infoTip: "Use your own executables instead. Leave a field empty to go back to the default."
+            ) {
+                VStack(alignment: .leading, spacing: DroppySpacing.xsm) {
+                    pathField("yt-dlp, e.g. /opt/homebrew/bin/yt-dlp", text: $ytDlpPath) {
+                        model.customYtDlpPath = ytDlpPath
+                    }
+                    pathField("ffmpeg, e.g. /opt/homebrew/bin/ffmpeg", text: $ffmpegPath) {
+                        model.customFFmpegPath = ffmpegPath
+                    }
+                }
+            }
+        }
+        .onAppear {
+            ytDlpPath = model.customYtDlpPath ?? ""
+            ffmpegPath = model.customFFmpegPath ?? ""
+        }
+        .onDisappear {
+            model.customYtDlpPath = ytDlpPath
+            model.customFFmpegPath = ffmpegPath
+        }
+    }
+
+    @ViewBuilder
+    private var ytDlpPills: some View {
+        switch model.toolStatus {
+        case .ready(let ytDlp, _):
+            if let version = ytDlp.version { DropletValuePill(text: version) }
+            DropletValuePill(text: ytDlp.source.title)
+        case .installing(let progress):
+            DropletValuePill(text: "Installing \(Int((progress * 100).rounded()))%")
+        case .unknown:
+            DropletValuePill(text: "Checking…")
+        case .missing, .failed:
+            DropletValuePill(text: "Not installed")
+        }
+    }
+
+    @ViewBuilder
+    private var ytDlpAction: some View {
+        switch model.toolStatus {
+        case .ready(let ytDlp, _) where ytDlp.source == .managed:
+            Button(model.isUpdatingTools ? "Checking…" : "Update") { model.updateYtDlp() }
+                .buttonStyle(DroppyQuietButtonStyle(size: .small))
+                .disabled(model.isUpdatingTools)
+        case .missing, .failed:
+            Button("Install") { model.installTools() }
+                .buttonStyle(DroppyAccentButtonStyle(size: .small))
+        default:
+            EmptyView()
+        }
+    }
+
+    private var ffmpegSource: String {
+        if let ffmpeg = model.detectedFFmpeg { return ffmpeg.source.title }
+        switch model.toolStatus {
+        case .unknown, .installing: return "Checking…"
+        default: return "Missing"
+        }
+    }
+
+    private func pathField(_ prompt: String, text: Binding<String>, commit: @escaping () -> Void) -> some View {
+        TextField(prompt, text: text)
+            .textFieldStyle(.plain)
+            .font(.system(size: 12, design: .monospaced))
+            .padding(.horizontal, DroppySpacing.sm)
+            .padding(.vertical, DroppySpacing.xs)
+            .background(
+                RoundedRectangle(cornerRadius: DroppyRadius.sm, style: .continuous)
+                    .fill(AdaptiveColors.overlayAuto(0.08))
+            )
+            .onSubmit(commit)
     }
 }
