@@ -1,0 +1,43 @@
+{
+  "id": "dropload",
+  "name": "Dropload",
+  "version": "1.0.0",
+  "summary": "Download the video in front of you with yt-dlp",
+  "description": "Paste a link, or let Dropload pick up the page open in Safari or a Chromium browser, choose the quality, the video container and the audio format, and download it with yt-dlp. Dropload installs its own copy of yt-dlp on first run and uses your ffmpeg when you have one.",
+  "category": "Media",
+  "kit": {
+    "abi": 1,
+    "minAPI": "1.8.0"
+  },
+  "minAppVersion": "15.3.0",
+  "capabilities": [
+    "expanded-surface",
+    "shelf-write",
+    "network-client",
+    "downloads",
+    "apple-events"
+  ],
+  "surfaces": [
+    "shelf-widget",
+    "expanded-surface",
+    "settings-pane"
+  ],
+  "icon": "Dropload.icon",
+  "creator": {
+    "name": "Fylen",
+    "kind": "community",
+    "url": "https://example.com",
+    "avatar": "Creator.png"
+  },
+  "source": {
+    "repository": "https://github.com/you/dropload",
+    "license": "MIT"
+  },
+  "keywords": [
+    "yt-dlp",
+    "youtube",
+    "video",
+    "download",
+    "ffmpeg"
+  ]
+}
