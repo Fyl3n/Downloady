@@ -40,6 +40,10 @@ public final class DownloadModel: ObservableObject {
     @Published public var urlText = ""
     /// Whether the user typed `urlText` (auto-fill never overwrites it).
     @Published public private(set) var urlWasTyped = false
+    /// The browser `urlText` came from, while it is an auto-filled URL.
+    @Published public private(set) var autoFilledBrowser: SupportedBrowser?
+    /// A browser refused Dropload's Apple event (error -1743).
+    @Published public private(set) var browserAccessDenied = false
     @Published public var options = DownloadOptions() {
         didSet {
             // An audio format the container cannot hold falls back to best.
@@ -73,6 +77,12 @@ public final class DownloadModel: ObservableObject {
     private var tools: ToolManaging?
     private var ytDlp: YtDlpRunning?
     private var browser: BrowserURLProviding?
+    private var browserIsWatching = false
+    private var browserReadTask: Task<Void, Never>?
+    /// What auto-fill replaced, restored when the new URL is unsupported.
+    private var beforeAutoFill: AutoFillSnapshot?
+    /// Whether yt-dlp could handle a URL, for the last 50 URLs seen.
+    private var verdicts = VerdictCache(capacity: 50)
     private var work: Task<Void, Never>?
     private var infoTask: Task<Void, Never>?
     /// The metadata of the URL in the bar, kept while a download runs so
@@ -112,9 +122,7 @@ public final class DownloadModel: ObservableObject {
                 self.installTools()
             }
         }
-
-        // TODO(T3): start the browser provider when `autoFillFromBrowser` is on
-        // and `apple-events` is granted, feeding `browserDidReport(_:)`.
+        updateBrowserWatching()
     }
 
     func stop() {
@@ -127,6 +135,10 @@ public final class DownloadModel: ObservableObject {
         isUpdatingTools = false
         ytDlp?.cancelAll()
         browser?.stop()
+        browserIsWatching = false
+        browserReadTask?.cancel()
+        browserReadTask = nil
+        beforeAutoFill = nil
         _ = host?.shelf.setHoldsOpen(false)
         if isBusy { phase = info.map(Phase.ready) ?? .idle }
         tools = nil
@@ -141,6 +153,8 @@ public final class DownloadModel: ObservableObject {
     public func userEditedURL(_ text: String) {
         urlText = text
         urlWasTyped = !text.isEmpty
+        autoFilledBrowser = nil
+        beforeAutoFill = nil
         guard !isDownloading else { return }
         infoTask?.cancel()
         infoTask = nil
@@ -156,11 +170,95 @@ public final class DownloadModel: ObservableObject {
         }
     }
 
-    /// The browser provider saw a new URL.
-    func browserDidReport(_ url: URL) {
-        guard !urlWasTyped, url.absoluteString != urlText else { return }
+    /// The shelf or the takeover appeared: read the browser now, so the URL
+    /// is the one in front of the user at the moment the shelf opens.
+    public func refreshFromBrowser() {
+        guard browserIsWatching, let browser, browserReadTask == nil else { return }
+        browserReadTask = Task { [weak self] in
+            let outcome = await browser.currentURL()
+            guard let self, !Task.isCancelled else { return }
+            self.browserReadTask = nil
+            self.browserDidRead(outcome)
+        }
+    }
+
+    func browserDidRead(_ outcome: BrowserReadOutcome) {
+        switch outcome {
+        case .url(let url, let source):
+            if browserAccessDenied { browserAccessDenied = false }
+            browserDidReport(url, from: source)
+        case .notAuthorized:
+            browserAccessDenied = true
+        case .nothing:
+            break
+        }
+    }
+
+    /// The browser provider saw a URL.
+    func browserDidReport(_ url: URL, from source: SupportedBrowser) {
+        let decision = Self.autoFillDecision(
+            for: url,
+            currentText: urlText,
+            urlWasTyped: urlWasTyped,
+            isBusy: isBusy,
+            toolsReady: toolStatus.isReady,
+            verdict: verdicts[url.absoluteString]
+        )
+        guard decision == .fill else { return }
+        if beforeAutoFill == nil {
+            beforeAutoFill = AutoFillSnapshot(
+                text: urlText, phase: phase, info: info, availability: availability, browser: autoFilledBrowser
+            )
+        }
+        infoTask?.cancel()
+        infoTask = nil
         urlText = url.absoluteString
-        // TODO(T3): fetch info; if `.unsupported`, clear the bar again.
+        urlWasTyped = false
+        autoFilledBrowser = source
+        info = nil
+        availability = .unrestricted
+        phase = .idle
+        fetchInfo()
+    }
+
+    /// Whether an URL the browser reported goes into the bar.
+    enum AutoFillDecision: Equatable {
+        case fill
+        case skip
+    }
+
+    static func autoFillDecision(
+        for url: URL,
+        currentText: String,
+        urlWasTyped: Bool,
+        isBusy: Bool,
+        toolsReady: Bool,
+        verdict: Bool?
+    ) -> AutoFillDecision {
+        guard !urlWasTyped, !isBusy, toolsReady else { return .skip }
+        guard BrowserURLProvider.acceptedURL(from: url.absoluteString) != nil else { return .skip }
+        guard url.absoluteString != currentText.trimmingCharacters(in: .whitespacesAndNewlines) else { return .skip }
+        // A page already known to be unsupported is not tried again.
+        guard verdict != false else { return .skip }
+        return .fill
+    }
+
+    /// Starts or stops the browser provider to match the toggle and the
+    /// `apple-events` grant.
+    private func updateBrowserWatching() {
+        guard let host, let browser else { return }
+        let wanted = autoFillFromBrowser && host.isGranted(.appleEvents)
+        guard wanted != browserIsWatching else { return }
+        browserIsWatching = wanted
+        if wanted {
+            browser.start { [weak self] outcome in self?.browserDidRead(outcome) }
+            host.log.info("Browser auto-fill on")
+        } else {
+            browser.stop()
+            browserReadTask?.cancel()
+            browserReadTask = nil
+            host.log.info("Browser auto-fill off")
+        }
     }
 
     /// Looks up the URL in the bar with `yt-dlp -J`: `.fetchingInfo`, then
@@ -181,8 +279,43 @@ public final class DownloadModel: ObservableObject {
             }
             guard let self, !Task.isCancelled, self.urlText == requested, !self.isDownloading else { return }
             self.infoTask = nil
-            self.applyInfo(outcome)
+            self.finishLookup(outcome, for: requested)
         }
+    }
+
+    /// Records the verdict, and for an auto-filled URL yt-dlp cannot use,
+    /// puts the bar back the way it was without a warning.
+    func finishLookup(_ outcome: Result<MediaInfo, Error>, for text: String) {
+        switch outcome {
+        case .success: verdicts[text] = true
+        case .failure(YtDlpError.unsupportedURL): verdicts[text] = false
+        default: break
+        }
+        guard autoFilledBrowser != nil else {
+            applyInfo(outcome)
+            return
+        }
+        switch outcome {
+        case .success:
+            beforeAutoFill = nil
+            applyInfo(outcome)
+        case .failure(YtDlpError.cancelled), .failure(is CancellationError):
+            break
+        case .failure:
+            restoreBeforeAutoFill()
+        }
+    }
+
+    private func restoreBeforeAutoFill() {
+        let snapshot = beforeAutoFill ?? AutoFillSnapshot(
+            text: "", phase: .idle, info: nil, availability: .unrestricted, browser: nil
+        )
+        beforeAutoFill = nil
+        urlText = snapshot.text
+        autoFilledBrowser = snapshot.browser
+        info = snapshot.info
+        availability = snapshot.availability
+        phase = snapshot.phase == .fetchingInfo ? .idle : snapshot.phase
     }
 
     func applyInfo(_ outcome: Result<MediaInfo, Error>) {
@@ -245,6 +378,8 @@ public final class DownloadModel: ObservableObject {
             _ = self.host?.shelf.setHoldsOpen(false)
             if let finalFile {
                 self.phase = .finished(finalFile)
+                // Auto-fill picks up the next page again.
+                self.urlWasTyped = false
             } else if let failure, failure as? YtDlpError != .cancelled {
                 self.phase = .failed(failure.localizedDescription)
             } else {
@@ -413,7 +548,36 @@ public final class DownloadModel: ObservableObject {
         set {
             host?.preferences.setValue(newValue, forKey: PreferenceKey.autoFillFromBrowser)
             objectWillChange.send()
+            updateBrowserWatching()
+            if newValue { refreshFromBrowser() }
         }
+    }
+
+    /// Whether Droppy granted the `apple-events` capability.
+    public var appleEventsGranted: Bool { host?.isGranted(.appleEvents) ?? false }
+
+    /// The Automation permission as Settings shows it. A browser that refused
+    /// an Apple event counts as denied.
+    public var automationStatus: DropletPermissionStatus {
+        guard let host else { return .unavailable }
+        if browserAccessDenied { return .denied }
+        return host.permissions.status(for: .appleEvents)
+    }
+
+    /// Asks for Automation. Only called from the Settings "Allow" button.
+    public func requestAutomation() {
+        guard let host else { return }
+        Task { [weak self] in
+            let status = await host.permissions.request(.appleEvents)
+            guard let self else { return }
+            if status == .granted { self.browserAccessDenied = false }
+            self.objectWillChange.send()
+            self.refreshFromBrowser()
+        }
+    }
+
+    public func openAutomationSettings() {
+        host?.permissions.openSystemSettings(for: .appleEvents)
     }
 
     public var customYtDlpPath: String? {
@@ -440,6 +604,42 @@ public final class DownloadModel: ObservableObject {
         switch phase {
         case .downloading, .postProcessing, .fetchingInfo, .unsupported: return false
         default: return true
+        }
+    }
+}
+
+/// The bar as it was before an auto-fill replaced it.
+struct AutoFillSnapshot {
+    let text: String
+    let phase: DownloadModel.Phase
+    let info: MediaInfo?
+    let availability: FormatAvailability
+    let browser: SupportedBrowser?
+}
+
+/// A small most-recently-set map from URL to "yt-dlp can handle it".
+struct VerdictCache {
+    let capacity: Int
+    private var values: [String: Bool] = [:]
+    private var order: [String] = []
+
+    init(capacity: Int) { self.capacity = capacity }
+
+    var count: Int { values.count }
+
+    subscript(key: String) -> Bool? {
+        get { values[key] }
+        set {
+            order.removeAll { $0 == key }
+            guard let newValue else {
+                values[key] = nil
+                return
+            }
+            values[key] = newValue
+            order.append(key)
+            while order.count > capacity {
+                values[order.removeFirst()] = nil
+            }
         }
     }
 }

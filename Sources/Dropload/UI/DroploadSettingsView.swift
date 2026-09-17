@@ -9,9 +9,6 @@ import AppKit
 import DroppyKit
 import SwiftUI
 
-/// TODO(T3): browser auto-fill toggle, Automation permission status with
-/// `host.permissions.openSystemSettings(for: .appleEvents)`, list of
-/// supported browsers.
 struct DroploadSettingsView: View {
     let droplet: DroploadDroplet
     @ObservedObject var model: DownloadModel
@@ -20,12 +17,87 @@ struct DroploadSettingsView: View {
         VStack(alignment: .leading, spacing: DroppySpacing.lg) {
             ToolsCard(model: model)
             DownloadsCard(model: model)
-            DropletSettingsCard {
-                DropletToggleRow(
-                    title: "Fill in the link from your browser",
-                    subtitle: "Reads the current tab of Safari or a Chromium browser when you open the shelf.",
-                    isOn: Binding(get: { model.autoFillFromBrowser }, set: { model.autoFillFromBrowser = $0 })
-                )
+            BrowserCard(model: model)
+        }
+    }
+}
+
+/// Auto-fill from the browser: the toggle, the Automation permission and the
+/// browsers Dropload can read.
+struct BrowserCard: View {
+    @ObservedObject var model: DownloadModel
+
+    var body: some View {
+        DropletSettingsCard {
+            DropletToggleRow(
+                title: "Fill in the link from your browser",
+                subtitle: "Reads the current tab of Safari or a Chromium browser when you open the shelf.",
+                isOn: Binding(get: { model.autoFillFromBrowser }, set: { model.autoFillFromBrowser = $0 })
+            )
+            DropletSettingsDivider()
+            DropletControlRow(
+                title: "Automation",
+                icon: "hand.raised",
+                infoTip: permissionTip
+            ) {
+                HStack(spacing: DroppySpacing.xsm) {
+                    DropletValuePill(text: permissionTitle)
+                    permissionAction
+                }
+            }
+            DropletSettingsDivider()
+            DropletControlRow(
+                title: "Supported browsers",
+                icon: "globe",
+                infoTip: Self.browserList + ". Firefox cannot be read."
+            ) {
+                Text(Self.browserSummary)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .help(Self.browserList)
+            }
+        }
+    }
+
+    static let browserList = SupportedBrowser.all.map(\.name).joined(separator: ", ")
+    static let browserSummary = "Safari, Chrome, Arc, Dia, Brave, Edge and more"
+
+    private var permissionTitle: String {
+        guard model.appleEventsGranted else { return "Off in Droppy" }
+        switch model.automationStatus {
+        case .granted: return "Allowed"
+        case .notDetermined: return "Not asked yet"
+        case .denied: return "Denied"
+        case .unavailable: return "Unavailable"
+        @unknown default: return "Unknown"
+        }
+    }
+
+    private var permissionTip: String {
+        guard model.appleEventsGranted else {
+            return "Turn on Apple events for Dropload in Droppy's Store settings."
+        }
+        switch model.automationStatus {
+        case .denied:
+            return "Allow Droppy to control your browser under Privacy & Security, Automation."
+        default:
+            return "macOS asks once per browser before Dropload can read its current tab."
+        }
+    }
+
+    @ViewBuilder
+    private var permissionAction: some View {
+        if model.appleEventsGranted {
+            switch model.automationStatus {
+            case .notDetermined:
+                Button("Allow") { model.requestAutomation() }
+                    .buttonStyle(DroppyAccentButtonStyle(size: .small))
+            case .denied:
+                Button("Open System Settings") { model.openAutomationSettings() }
+                    .buttonStyle(DroppyQuietButtonStyle(size: .small))
+            default:
+                EmptyView()
             }
         }
     }

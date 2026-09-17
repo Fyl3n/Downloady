@@ -18,6 +18,14 @@ struct URLBar: View {
 
     var body: some View {
         HStack(spacing: DroppySpacing.xsm) {
+            if let source = model.autoFilledBrowser {
+                Image(systemName: source.family == .safari ? "safari" : "globe")
+                    .font(.system(size: 11))
+                    .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+                    .help("From \(source.name)")
+                    .accessibilityLabel("From \(source.name)")
+                    .transition(DroppyTransition.element)
+            }
             TextField(
                 "Paste a video link",
                 text: Binding(get: { model.urlText }, set: { model.userEditedURL($0) })
@@ -47,6 +55,8 @@ struct URLBar: View {
             RoundedRectangle(cornerRadius: DroppyRadius.sm, style: .continuous)
                 .fill(AdaptiveColors.notchSurfaceCardFill)
         )
+        .animation(DroppyAnimation.state, value: model.autoFilledBrowser)
+        .onAppear { model.refreshFromBrowser() }
     }
 
     @ViewBuilder
