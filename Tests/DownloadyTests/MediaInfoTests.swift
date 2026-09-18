@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import Dropload
+@testable import Downloady
 
 @Suite struct FormatAvailabilityTests {
     /// Trimmed from a real `yt-dlp -J` of a YouTube video that tops out at 720p,
@@ -93,12 +93,14 @@ import Testing
 
 @Suite struct OptionsSummaryTests {
     @Test func describesTheResult() {
-        #expect(DownloadOptions(quality: .p1080, container: .mp4, audio: .m4a).summary == "1080p mp4 with m4a audio")
-        #expect(DownloadOptions(quality: .best, container: .mkv, audio: .best).summary == "Best quality mkv with the best audio")
-        #expect(DownloadOptions(quality: .audioOnly, audio: .mp3).summary == "mp3 audio only")
-        #expect(DownloadOptions(quality: .audioOnly, audio: .best).summary == "Best audio only")
-        // mp3 cannot go into mp4 with video: normalized to best.
-        #expect(DownloadOptions(quality: .p720, container: .mp4, audio: .mp3).summary == "720p mp4 with the best audio")
+        #expect(DownloadOptions(quality: .p1080, container: .mp4, audio: .m4a).summary == "1080p mp4, m4a audio")
+        #expect(DownloadOptions().summary == "Best video, original audio")
+        #expect(DownloadOptions(quality: .best, container: .mkv, audioQuality: .k128).summary == "Best mkv, original audio up to 128 kbps")
+        #expect(DownloadOptions(quality: .audioOnly, audio: .mp3, audioQuality: .k192).summary == "mp3 audio only, 192 kbps")
+        #expect(DownloadOptions(quality: .audioOnly, audioQuality: .k128).summary == "Original audio only, up to 128 kbps")
+        #expect(DownloadOptions(quality: .audioOnly, audio: .flac, audioQuality: .k128).summary == "flac audio only")
+        // mp3 cannot go into mp4 with video: normalized to original.
+        #expect(DownloadOptions(quality: .p720, container: .mp4, audio: .mp3).summary == "720p mp4, original audio")
     }
 }
 
@@ -136,7 +138,7 @@ import Testing
     @Test func invalidOptionsAreNormalized() {
         let model = DownloadModel()
         model.options = DownloadOptions(quality: .p720, container: .webm, audio: .m4a)
-        #expect(model.options.audio == .best)
+        #expect(model.options.audio == .original)
     }
 
     @Test func webURLs() {

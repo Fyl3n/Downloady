@@ -2,36 +2,36 @@
 import PackageDescription
 
 let package = Package(
-    name: "Dropload",
+    name: "Downloady",
     platforms: [.macOS(.v14)],
     products: [
         // A droplet is a loadable bundle, so its product is a dynamic library.
         // Do not make it static: the app already carries DroppyKit, and a
         // second copy inside the droplet gives the same type two metadata
         // records, which fails every cast between them.
-        .library(name: "Dropload", type: .dynamic, targets: ["Dropload"])
+        .library(name: "Downloady", type: .dynamic, targets: ["Downloady"])
     ],
     dependencies: [
         .package(url: "https://gitlab.com/droppyformac1/droppykit.git", from: "1.8.0")
     ],
     targets: [
         .target(
-            name: "Dropload",
+            name: "Downloady",
             dependencies: [.product(name: "DroppyKit", package: "droppykit")]
         ),
         .executableTarget(
-            name: "DroploadHarness",
+            name: "DownloadyHarness",
             dependencies: [
-                "Dropload",
+                "Downloady",
                 .product(name: "DroppyKitHarness", package: "droppykit")
             ]
         ),
         // Unit tests for the pure logic (option mapping, metadata decoding,
-        // browser table). `droppykit build` compiles only the Dropload target,
+        // browser table). `droppykit build` compiles only the Downloady target,
         // so this never reaches the bundle.
         .testTarget(
-            name: "DroploadTests",
-            dependencies: ["Dropload"]
+            name: "DownloadyTests",
+            dependencies: ["Downloady"]
         )
     ]
 )

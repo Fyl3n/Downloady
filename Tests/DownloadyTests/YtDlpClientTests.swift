@@ -1,25 +1,25 @@
 import Foundation
 import Testing
-@testable import Dropload
+@testable import Downloady
 
 @Suite struct ProgressParserTests {
     @Test func parsesAPaddedLine() {
-        #expect(ProgressParser.parse("dropload  42.3%|  3.10MiB/s|00:12")
+        #expect(ProgressParser.parse("downloady  42.3%|  3.10MiB/s|00:12")
             == .progress(fraction: 0.423, speed: "3.10MiB/s", eta: "00:12"))
     }
 
     @Test func turnsUnknownFieldsIntoNil() {
-        #expect(ProgressParser.parse("dropload 100.0%|1.18MiB/s|NA")
+        #expect(ProgressParser.parse("downloady 100.0%|1.18MiB/s|NA")
             == .progress(fraction: 1, speed: "1.18MiB/s", eta: nil))
-        #expect(ProgressParser.parse("dropload   0.0%|Unknown|Unknown")
+        #expect(ProgressParser.parse("downloady   0.0%|Unknown|Unknown")
             == .progress(fraction: 0, speed: nil, eta: nil))
-        #expect(ProgressParser.parse("dropload NA|NA|NA") == nil)
+        #expect(ProgressParser.parse("downloady NA|NA|NA") == nil)
     }
 
     @Test func ignoresOtherLines() {
         #expect(ProgressParser.parse("[download] Destination: /tmp/a.webm") == nil)
-        #expect(ProgressParser.parse("dropload") == nil)
-        #expect(ProgressParser.parse("dropload 12%|x") == nil)
+        #expect(ProgressParser.parse("downloady") == nil)
+        #expect(ProgressParser.parse("downloady 12%|x") == nil)
         #expect(ProgressParser.parse("") == nil)
     }
 }
@@ -48,7 +48,7 @@ import Testing
     }
 
     @Test func classifiesLines() {
-        #expect(YtDlpCommand.event(forLine: "dropload  50.0%|1MiB/s|00:01") == .progress(fraction: 0.5, speed: "1MiB/s", eta: "00:01"))
+        #expect(YtDlpCommand.event(forLine: "downloady  50.0%|1MiB/s|00:01") == .progress(fraction: 0.5, speed: "1MiB/s", eta: "00:01"))
         #expect(YtDlpCommand.event(forLine: "[Merger] Merging formats into \"/tmp/a.mp4\"") == .postProcessing)
         #expect(YtDlpCommand.event(forLine: "[ExtractAudio] Destination: /tmp/a.mp3") == .postProcessing)
         #expect(YtDlpCommand.event(forLine: "[VideoRemuxer] Not remuxing") == .postProcessing)
@@ -60,7 +60,7 @@ import Testing
     @Test func readsTheDestinationLine() {
         #expect(YtDlpCommand.event(forLine: "[download] Destination: /tmp/Me at the zoo [id].f401.mp4")
             == .destination(URL(fileURLWithPath: "/tmp/Me at the zoo [id].f401.mp4")))
-        // A relative path is not one Dropload would know how to clean up.
+        // A relative path is not one Downloady would know how to clean up.
         #expect(YtDlpCommand.event(forLine: "[download] Destination: a.mp4") == nil)
     }
 
@@ -81,14 +81,54 @@ import Testing
         #expect(YtDlpCommand.errorMessage(fromStderr: "one\ntwo\n\n") == "two")
         #expect(YtDlpCommand.errorMessage(fromStderr: "") == "")
     }
+
+    @Test func theProbeStaysOffTheNetwork() {
+        let args = YtDlpCommand.supportProbe(URL(string: "https://example.com")!)
+        #expect(args.firstIndex(of: "--ies").map { args[$0 + 1] } == "default,-generic")
+        #expect(args.firstIndex(of: "--proxy").map { args[$0 + 1] } == "http://127.0.0.1:9")
+        #expect(args.suffix(2) == ["--", "https://example.com"])
+    }
+
+    @Test func readsTheProbe() {
+        let claimed = "ERROR: [youtube] abc: Unable to download API page: Connection refused"
+        #expect(YtDlpCommand.probeSaysSupported(status: 1, stderr: claimed))
+        #expect(!YtDlpCommand.probeSaysSupported(status: 1, stderr: "ERROR: No suitable extractor found for URL https://x.com/home"))
+        #expect(!YtDlpCommand.probeSaysSupported(status: 1, stderr: "ERROR: Unsupported URL: https://example.com/"))
+        #expect(YtDlpCommand.probeSaysSupported(status: 0, stderr: ""))
+        // A yt-dlp without --ies: leave it to the full lookup.
+        #expect(YtDlpCommand.probeSaysSupported(status: 2, stderr: "yt-dlp: error: no such option: --ies"))
+    }
 }
 
-private let networkTestYtDlpPath = ProcessInfo.processInfo.environment["DROPLOAD_YTDLP"] ?? "/opt/homebrew/bin/yt-dlp"
-
-/// Real yt-dlp against the network, opt-in: `DROPLOAD_NETWORK_TESTS=1 swift test`.
-/// Uses Homebrew's yt-dlp (or `DROPLOAD_YTDLP`) and ffmpeg, and a 19-second video.
+/// The probe with the real yt-dlp. It never leaves the Mac, so it runs
+/// whenever Homebrew's yt-dlp (or `DOWNLOADY_YTDLP`) is there.
 @MainActor
-@Suite(.serialized, .enabled(if: ProcessInfo.processInfo.environment["DROPLOAD_NETWORK_TESTS"] == "1"
+@Suite(.enabled(if: FileManager.default.isExecutableFile(atPath: networkTestYtDlpPath)))
+struct YtDlpProbeTests {
+    let client = YtDlpClient(tools: {
+        .ready(
+            ytDlp: ToolLocation(url: URL(fileURLWithPath: networkTestYtDlpPath), source: .custom, version: nil),
+            ffmpeg: nil
+        )
+    }, log: { _ in })
+
+    @Test(arguments: [
+        ("https://www.youtube.com/watch?v=jNQXAC9IVRw", true),
+        ("https://vimeo.com/76979871", true),
+        ("https://github.com/yt-dlp/yt-dlp", false),
+        ("https://www.lemonde.fr/", false),
+    ])
+    func claimsOnlyWhatAnExtractorKnows(url: String, supported: Bool) async {
+        #expect(await client.isSupported(URL(string: url)!) == supported)
+    }
+}
+
+private let networkTestYtDlpPath = ProcessInfo.processInfo.environment["DOWNLOADY_YTDLP"] ?? "/opt/homebrew/bin/yt-dlp"
+
+/// Real yt-dlp against the network, opt-in: `DOWNLOADY_NETWORK_TESTS=1 swift test`.
+/// Uses Homebrew's yt-dlp (or `DOWNLOADY_YTDLP`) and ffmpeg, and a 19-second video.
+@MainActor
+@Suite(.serialized, .enabled(if: ProcessInfo.processInfo.environment["DOWNLOADY_NETWORK_TESTS"] == "1"
     && FileManager.default.isExecutableFile(atPath: networkTestYtDlpPath)))
 struct YtDlpClientNetworkTests {
     static let video = URL(string: "https://www.youtube.com/watch?v=jNQXAC9IVRw")!
@@ -120,9 +160,9 @@ struct YtDlpClientNetworkTests {
     }
 
     @Test(arguments: [
-        (DownloadOptions(quality: .p1080, container: .mp4, audio: .best), "mp4"),
+        (DownloadOptions(quality: .p1080, container: .mp4, audio: .original), "mp4"),
         (DownloadOptions(quality: .audioOnly, container: .mp4, audio: .mp3), "mp3"),
-        (DownloadOptions(quality: .best, container: .mkv, audio: .best), "mkv"),
+        (DownloadOptions(quality: .best, container: .mkv, audio: .original), "mkv"),
     ])
     func downloadsTheRequestedFormat(options: DownloadOptions, ext: String) async throws {
         let folder = try Self.makeFolder()
@@ -192,13 +232,13 @@ struct YtDlpClientNetworkTests {
     }
 
     static func makeFolder() throws -> URL {
-        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("dropload-dl-\(UUID().uuidString)", isDirectory: true)
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("downloady-dl-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         return folder
     }
 
     /// Child processes of this test process (yt-dlp and whatever it spawned).
     static func runningYtDlp() -> Int {
-        YtDlpProcess.descendants(of: getpid()).count
+        ChildProcess.descendants(of: getpid()).count
     }
 }

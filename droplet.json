@@ -1,9 +1,9 @@
 {
-  "id": "dropload",
-  "name": "Dropload",
+  "id": "downloady",
+  "name": "Downloady",
   "version": "1.0.0",
-  "summary": "Download the video in front of you with yt-dlp",
-  "description": "Paste a link, or let Dropload pick up the page open in Safari or a Chromium browser, choose the quality, the video container and the audio format, and download it with yt-dlp. Dropload installs its own copy of yt-dlp on first run and uses your ffmpeg when you have one.",
+  "summary": "Download the video in front of you, with text",
+  "description": "Paste a link, or let Downloady pick up the page open in Safari or a Chromium browser, choose the quality, the video container and the audio format, and download it with yt-dlp. It can write the site's subtitles beside the video, or transcribe it on this Mac on macOS 26. Downloads and transcripts run in the background, in a queue you can watch from the notch.",
   "category": "Media",
   "kit": {
     "abi": 1,
@@ -13,11 +13,11 @@
   "capabilities": [
     "expanded-surface",
     "shelf-read",
-    "shelf-write",
     "hud",
     "network-client",
     "downloads",
-    "apple-events"
+    "apple-events",
+    "speech-recognition"
   ],
   "surfaces": [
     "shelf-widget",
@@ -26,7 +26,7 @@
     "hud",
     "settings-pane"
   ],
-  "icon": "Dropload.icon",
+  "icon": "Downloady.icon",
   "creator": {
     "name": "Fylen",
     "kind": "community",
@@ -34,7 +34,7 @@
     "avatar": "Creator.png"
   },
   "source": {
-    "repository": "https://github.com/you/dropload",
+    "repository": "https://github.com/you/downloady",
     "license": "MIT"
   },
   "keywords": [
@@ -42,6 +42,8 @@
     "youtube",
     "video",
     "download",
-    "ffmpeg"
+    "ffmpeg",
+    "subtitles",
+    "transcript"
   ]
 }

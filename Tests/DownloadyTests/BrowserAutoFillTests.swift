@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import Dropload
+@testable import Downloady
 
 @Suite struct SupportedBrowserTests {
     @Test func matchesKnownBundleIDs() {
@@ -60,13 +60,12 @@ import Testing
         _ url: URL? = nil,
         text: String = "",
         typed: Bool = false,
-        busy: Bool = false,
         ready: Bool = true,
         verdict: Bool? = nil
     ) -> DownloadModel.AutoFillDecision {
         DownloadModel.autoFillDecision(
             for: url ?? video, currentText: text, urlWasTyped: typed,
-            isBusy: busy, toolsReady: ready, verdict: verdict
+            toolsReady: ready, verdict: verdict
         )
     }
 
@@ -85,9 +84,13 @@ import Testing
         #expect(decide(text: " \(video.absoluteString) ") == .skip)
     }
 
-    @Test func skipsWhileBusyOrWithoutYtDlp() {
-        #expect(decide(busy: true) == .skip)
+    @Test func skipsWithoutYtDlp() {
         #expect(decide(ready: false) == .skip)
+    }
+
+    /// A download runs in the queue, so the bar keeps following the browser.
+    @Test func fillsWhileAJobRuns() {
+        #expect(decide(text: "https://vimeo.com/1") == .fill)
     }
 
     @Test func skipsKnownUnsupportedPages() {

@@ -2,7 +2,7 @@
 
 **Depends on:** T2 (uses `DownloadModel.fetchInfo`) · **Files:**
 `Browser/BrowserURLProvider.swift`, `Model/DownloadModel.swift`,
-`UI/DroploadSettingsView.swift`, `UI/DroploadWidget.swift`.
+`UI/DownloadySettingsView.swift`, `UI/DownloadyWidget.swift`.
 
 ## Goal
 

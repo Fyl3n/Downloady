@@ -1,5 +1,5 @@
 ---
-description: Dropload is a Droplet for Droppy, built with DroppyKit. The brief, the build loop and the rules live in AGENTS.md at the package root.
+description: Downloady is a Droplet for Droppy, built with DroppyKit. The brief, the build loop and the rules live in AGENTS.md at the package root.
 alwaysApply: true
 ---
 

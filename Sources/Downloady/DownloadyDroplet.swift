@@ -1,6 +1,6 @@
 //
-//  DroploadDroplet.swift
-//  Dropload
+//  DownloadyDroplet.swift
+//  Downloady
 //
 //  Entry point and surface conformances. The state lives in `DownloadModel`;
 //  the views live in `UI/`.
@@ -12,53 +12,63 @@ import SwiftUI
 
 /// The class Droppy's loader instantiates, named in the bundle's
 /// `NSPrincipalClass`. Keep it empty: it runs before the host is ready.
-@objc(DroploadPrincipal)
-public final class DroploadPrincipal: NSObject, DropletPrincipal {
+@objc(DownloadyPrincipal)
+public final class DownloadyPrincipal: NSObject, DropletPrincipal {
     public override init() { super.init() }
 
-    @MainActor public func makeDroplet() -> AnyObject { DroploadDroplet() }
+    @MainActor public func makeDroplet() -> AnyObject { DownloadyDroplet() }
 }
 
-/// Dropload: download the video in front of you with yt-dlp.
+/// Downloady: download the video in front of you with yt-dlp.
 @MainActor
-public final class DroploadDroplet: NSObject, ObservableObject, Droplet {
+public final class DownloadyDroplet: NSObject, ObservableObject, Droplet {
     /// Must equal `DroppyDropletID` in the bundle's Info.plist and `id` in
     /// droplet.json. The loader refuses the bundle if the three disagree.
-    public nonisolated static let id: DropletID = "dropload"
+    public nonisolated static let id: DropletID = "downloady"
 
-    static let widgetID: ShelfWidgetID = "dropload"
-    static let detailSurfaceID: ExpandedSurfaceID = "dropload-detail"
+    static let widgetID: ShelfWidgetID = "downloady"
+    static let detailSurfaceID: ExpandedSurfaceID = "downloady-detail"
+    static let queueSurfaceID: ExpandedSurfaceID = "downloady-queue"
 
-    /// The HUD shown when a download ends, and the card it grows into.
-    static let completionHUDID = "dropload.finished"
+    /// The HUD shown when a file lands, and the card it grows into.
+    static let completionHUDID = "downloady.finished"
 
     private(set) var host: DropletHost?
     public let model = DownloadModel()
 
     /// What the host reads for the compact live activity. `nil` stands down.
     private let activitySubject = CurrentValueSubject<LiveActivityState?, Never>(nil)
-    /// The phase subscription that drives the HUD and the live activity.
-    private var phaseObserver: AnyCancellable?
+    /// The queue subscription that drives the live activity.
+    private var queueObserver: AnyCancellable?
+    /// The one that puts a HUD up when a file lands.
+    private var noticeObserver: AnyCancellable?
     /// Grows the completion strip into its card a beat after it appears.
     private var hudTask: Task<Void, Never>?
     /// The file the completion HUD is about, while it is up.
     private var hudFile: URL?
+    /// Whether the queue was opened from the takeover, so Back goes there.
+    private var queueReturnsToDetail = false
 
     public func activate(host: DropletHost) throws {
         self.host = host
         model.start(host: host)
-        // The HUD and the live activity are both a pure function of the phase.
-        phaseObserver = model.$phase.sink { [weak self] phase in
-            self?.phaseDidChange(phase)
+        // The live activity is a pure function of the queue.
+        queueObserver = model.$jobs.sink { [weak self] jobs in
+            self?.publishActivity(for: QueueSummary(jobs: jobs))
         }
-        host.log.info("Dropload activated")
+        noticeObserver = model.notices.sink { [weak self] notice in
+            self?.present(notice)
+        }
+        host.log.info("Downloady activated")
     }
 
     public func deactivate() {
         // Everything activate() started is torn down here. Swift cannot unload
         // code, so anything left running keeps running until Droppy relaunches.
-        phaseObserver?.cancel()
-        phaseObserver = nil
+        queueObserver?.cancel()
+        queueObserver = nil
+        noticeObserver?.cancel()
+        noticeObserver = nil
         hudTask?.cancel()
         hudTask = nil
         if hudFile != nil {
@@ -70,51 +80,63 @@ public final class DroploadDroplet: NSObject, ObservableObject, Droplet {
         host = nil
     }
 
-    /// Refuse removal while a download is running.
-    public func prepareForRemoval() -> Bool {
-        switch model.phase {
-        case .downloading, .postProcessing: false
-        default: true
-        }
-    }
+    /// Refuse removal while anything is still running.
+    public func prepareForRemoval() -> Bool { !model.hasActiveJobs }
 
     /// Opens the takeover from the widget.
     func openDetail() {
-        let presentation = host?.notchSurface.presentExpandedSurface(
-            ExpandedSurfacePresentationRequest(surfaceID: Self.detailSurfaceID, opensShelf: true)
+        present(Self.detailSurfaceID)
+    }
+
+    /// Opens the queue, from the queue button in the form. `fromDetail` says
+    /// where Back returns to: the takeover it was opened from, or the shelf.
+    func openQueue(fromDetail: Bool) {
+        queueReturnsToDetail = fromDetail
+        present(Self.queueSurfaceID)
+    }
+
+    /// The queue's Back button.
+    func closeQueue() {
+        if queueReturnsToDetail {
+            present(Self.detailSurfaceID)
+        } else {
+            host?.notchSurface.dismissExpandedSurface(Self.queueSurfaceID)
+        }
+    }
+
+    private func present(_ id: ExpandedSurfaceID) {
+        guard let host else { return }
+        let presentation = host.notchSurface.presentExpandedSurface(
+            ExpandedSurfacePresentationRequest(surfaceID: id, opensShelf: true)
         )
-        if presentation == nil { host?.log.debug("detail surface not shown") }
+        host.log.info("\(id.rawValue) presented: \(presentation != nil)")
     }
 
     func openSettings() {
         _ = host?.workspace.openSettings()
     }
 
-    // MARK: Phase side effects
-
-    /// Publishes the live activity for the new phase, and puts the completion
-    /// HUD up when a download just ended off-screen.
-    private func phaseDidChange(_ phase: DownloadModel.Phase) {
-        publishActivity(for: phase)
-        if case .finished(let file) = phase {
-            presentCompletionHUD(for: file)
-        } else if hudFile != nil {
-            hudTask?.cancel()
-            hudTask = nil
-            host?.hud.dismiss(id: Self.completionHUDID)
-            hudFile = nil
+    /// A file landed: say so, unless the user is already looking at the shelf.
+    private func present(_ notice: DownloadModel.Notice) {
+        switch notice {
+        case .downloaded(let job):
+            guard let file = job.file else { return }
+            presentCompletionHUD(title: "Downloaded", file: file)
+        case .transcribed(let job):
+            guard let transcript = job.transcript else { return }
+            presentCompletionHUD(title: "Transcript ready", file: transcript)
         }
     }
 }
 
 // MARK: - Shelf widget
 
-extension DroploadDroplet: ShelfWidgetProviding {
+extension DownloadyDroplet: ShelfWidgetProviding {
     public var widgetDescriptors: [ShelfWidgetDescriptor] {
         [
             ShelfWidgetDescriptor(
                 id: Self.widgetID,
-                title: "Dropload",
+                title: "Downloady",
                 systemImage: "arrow.down.circle",
                 layoutTraits: ShelfWidgetLayoutTraits(
                     // Solo: URL bar, the three pickers in a row, the action row.
@@ -125,14 +147,14 @@ extension DroploadDroplet: ShelfWidgetProviding {
                     // the action row with a DroppySpacing.sm step between
                     // them. The paired composition drops the pickers and is
                     // shorter, but the shelf gives a widget one height.
-                    contentHeight: .fixed(DroploadWidget.soloContentHeight)
+                    contentHeight: .fixed(DownloadyWidget.soloContentHeight)
                 )
             )
         ]
     }
 
     public func makeWidgetView(_ id: ShelfWidgetID, context: ShelfWidgetContext) -> AnyView {
-        AnyView(DroploadWidget(droplet: self, model: model, context: context))
+        AnyView(DownloadyWidget(droplet: self, model: model, context: context))
     }
 
     public func makeWidgetSettingsPopover(_ id: ShelfWidgetID) -> AnyView? { nil }
@@ -140,28 +162,42 @@ extension DroploadDroplet: ShelfWidgetProviding {
 
 // MARK: - Expanded surface
 
-extension DroploadDroplet: ExpandedSurfaceProviding {
+extension DownloadyDroplet: ExpandedSurfaceProviding {
     public var expandedSurfaces: [ExpandedSurfaceDescriptor] {
         [
             ExpandedSurfaceDescriptor(
                 id: Self.detailSurfaceID,
-                title: "Dropload",
+                title: "Downloady",
                 systemImage: "arrow.down.circle",
                 suppresses: [.shelfWidgets, .autoCollapse]
-            )
+            ),
+            ExpandedSurfaceDescriptor(
+                id: Self.queueSurfaceID,
+                title: "Downloads",
+                systemImage: "list.bullet",
+                suppresses: [.shelfWidgets, .autoCollapse]
+            ),
         ]
     }
 
     public func makeExpandedSurfaceView(_ id: ExpandedSurfaceID, context: ExpandedSurfaceContext) -> AnyView {
-        AnyView(DroploadDetailView(droplet: self, model: model, context: context))
+        id == Self.queueSurfaceID
+            ? AnyView(QueueView(droplet: self, model: model, context: context))
+            : AnyView(DownloadyDetailView(droplet: self, model: model, context: context))
     }
 
     public func expandedSurfaceSize(_ id: ExpandedSurfaceID, fitting proposal: ExpandedSurfaceSizeProposal) -> CGSize? {
-        // The takeover is as tall as its content, not as tall as it may be:
+        // Each takeover is as tall as its content, not as tall as it may be:
         // a Spacer under the last row is unused space the host drew for us.
-        CGSize(
-            width: max(proposal.standardSize.width, 460),
-            height: min(proposal.maximumSize.height, DroploadDetailView.contentHeight)
+        // The queue is measured for the rows it has when it opens; rows added
+        // while it is up scroll inside it.
+        let height = id == Self.queueSurfaceID
+            ? QueueView.contentHeight(rows: model.jobs.count)
+            : DownloadyDetailView.contentHeight
+        // Five pickers in a row need more than the notch's own width.
+        return CGSize(
+            width: max(proposal.standardSize.width, min(proposal.maximumSize.width, 540)),
+            height: min(proposal.maximumSize.height, height)
         )
     }
 
@@ -174,50 +210,59 @@ extension DroploadDroplet: ExpandedSurfaceProviding {
     }
 }
 
+/// How Droppy finds the takeover: it casts the droplet to
+/// `ExpandedSurfaceHosting` and asks for the provider. Conforming to
+/// `ExpandedSurfaceProviding` alone is enough for the harness, but the real
+/// host then refuses every present with "the droplet does not publish a
+/// surface with that id".
+extension DownloadyDroplet: ExpandedSurfaceHosting {
+    public var expandedSurfaceProvider: (any ExpandedSurfaceProviding)? { self }
+}
+
 // MARK: - Settings pane
 
-extension DroploadDroplet: SettingsPaneProviding {
+extension DownloadyDroplet: SettingsPaneProviding {
     public func makeSettingsPane(context: SettingsPaneContext) -> AnyView {
-        AnyView(DroploadSettingsView(droplet: self, model: model))
+        AnyView(DownloadySettingsView(droplet: self, model: model))
     }
 
     public var settingsSearchEntries: [SettingsSearchEntry] {
-        [SettingsSearchEntry(title: "Dropload", keywords: ["yt-dlp", "download", "video", "ffmpeg"])]
+        [SettingsSearchEntry(title: "Downloady", keywords: ["yt-dlp", "download", "video", "ffmpeg"])]
     }
 }
 
 // MARK: - Completion HUD
 
-extension DroploadDroplet: HUDPresenting {
+extension DownloadyDroplet: HUDPresenting {
     /// Tells the user a download ended while they were looking elsewhere.
     ///
     /// The strip is the at-rest form, "Downloaded" and the file name. It grows
     /// into the card a beat later, the way Droppy's own battery HUD does, so
     /// Show in Finder is in reach; growing is one re-present with the same id,
     /// never a second HUD.
-    private func presentCompletionHUD(for file: URL) {
+    private func presentCompletionHUD(title: String, file: URL) {
         guard let host else { return }
         // Nothing to announce while the user is already looking at the shelf.
         guard !host.shelf.isExpanded else { return }
         hudFile = file
-        showCompletionHUD(for: file, expanded: false, duration: nil)
+        showCompletionHUD(title: title, for: file, expanded: false, duration: nil)
         hudTask?.cancel()
         hudTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(900))
             guard let self, !Task.isCancelled, self.hudFile == file else { return }
-            self.showCompletionHUD(for: file, expanded: true, duration: 6)
+            self.showCompletionHUD(title: title, for: file, expanded: true, duration: 6)
             self.hudTask = nil
         }
     }
 
-    private func showCompletionHUD(for file: URL, expanded: Bool, duration: TimeInterval?) {
+    private func showCompletionHUD(title: String, for file: URL, expanded: Bool, duration: TimeInterval?) {
         guard let host else { return }
         let name = file.lastPathComponent
         let request = DropletHUDRequest(
             id: Self.completionHUDID,
             duration: duration,
             priority: .normal,
-            accessibilityLabel: "Downloaded \(name)",
+            accessibilityLabel: "\(title): \(name)",
             isExpanded: expanded,
             expandedContentHeight: 62,
             content: {
@@ -230,7 +275,7 @@ extension DroploadDroplet: HUDPresenting {
                     Image(systemName: "checkmark.circle.fill")
                         .font(.system(size: DroppyLiveActivityMetrics.iconSize, weight: .semibold))
                     Spacer(minLength: 0)
-                    Text("Saved")
+                    Text(file.pathExtension == "srt" ? "Text" : "Saved")
                         .font(.system(size: DroppyLiveActivityMetrics.labelFontSize, weight: .semibold))
                         .lineLimit(1)
                 }
@@ -238,7 +283,7 @@ extension DroploadDroplet: HUDPresenting {
                 .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
             },
             expanded: { [weak self] in
-                DownloadedHUDCard(name: name) { self?.model.revealDownloadedFile() }
+                DownloadedHUDCard(title: title, name: name) { self?.model.reveal(file) }
             }
         )
         _ = host.hud.present(request)
@@ -247,31 +292,31 @@ extension DroploadDroplet: HUDPresenting {
 
 // MARK: - Live activity
 
-extension DroploadDroplet: LiveActivityProviding {
+extension DownloadyDroplet: LiveActivityProviding {
     public var liveActivityState: AnyPublisher<LiveActivityState?, Never> {
         activitySubject.eraseToAnyPublisher()
     }
 
-    /// Asks for the compact seat only while a download is running, and stands
-    /// down the moment it ends: the shelf widget is where the finished file is.
-    private func publishActivity(for phase: DownloadModel.Phase) {
-        switch phase {
-        case .downloading, .postProcessing:
-            activitySubject.send(
-                LiveActivityState(
-                    // Below Droppy's own timers and calls: a download is a
-                    // status, not something the user is waiting on the second.
-                    priority: 150,
-                    accessibilityTitle: "Downloading",
-                    isInteractive: false,
-                    joinsPersistentActivitySet: false,
-                    compactPresentation: nil,
-                    expandedWidgetID: Self.widgetID.rawValue
-                )
-            )
-        default:
+    /// Asks for the compact seat while any job is running — a download, or a
+    /// transcript running behind it — and stands down the moment the queue
+    /// goes quiet: the shelf is where the finished files are.
+    private func publishActivity(for summary: QueueSummary) {
+        guard summary.isActive else {
             activitySubject.send(nil)
+            return
         }
+        activitySubject.send(
+            LiveActivityState(
+                // Below Droppy's own timers and calls: a download is a
+                // status, not something the user is waiting on the second.
+                priority: 150,
+                accessibilityTitle: summary.leading?.isTranscribing == true ? "Transcribing" : "Downloading",
+                isInteractive: false,
+                joinsPersistentActivitySet: false,
+                compactPresentation: nil,
+                expandedWidgetID: Self.widgetID.rawValue
+            )
+        )
     }
 
     public func liveActivitySeatDidChange(_ seat: DropletLiveActivitySeat) {

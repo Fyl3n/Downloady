@@ -4,8 +4,8 @@
 `PreferenceKey.customYtDlpPath` at `/opt/homebrew/bin/yt-dlp`.
 **Files:** `Tools/YtDlpClient.swift`, `Model/MediaInfo.swift`,
 `Model/DownloadModel.swift`, `UI/DownloadForm.swift`,
-`UI/DroploadWidget.swift`, `UI/DroploadDetailView.swift`,
-`UI/DroploadSettingsView.swift` (download folder).
+`UI/DownloadyWidget.swift`, `UI/DownloadyDetailView.swift`,
+`UI/DownloadySettingsView.swift` (download folder).
 
 ## Goal
 
@@ -23,7 +23,7 @@ watch the progress, and get the file.
      `.processFailed`, carrying the last stderr line.
    - `download`: `DownloadOptions.ytDlpArguments` plus
      `-o "<folder>/%(title).200B [%(id)s].%(ext)s"`,
-     `--progress-template "download:dropload %(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s"`,
+     `--progress-template "download:downloady %(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s"`,
      and `--print after_move:filepath`. Stream stdout line by line off the
      main actor and emit `DownloadEvent`s on it. Lines starting with
      `[Merger]`, `[ExtractAudio]` or `[VideoRemuxer]` produce

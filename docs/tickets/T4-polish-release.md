@@ -1,11 +1,11 @@
 # T4: Polish, completion feedback and release readiness
 
-**Depends on:** T1–T3 · **Files:** the UI, `droplet.json`, `Dropload.icon`,
+**Depends on:** T1–T3 · **Files:** the UI, `droplet.json`, `Downloady.icon`,
 `Assets/Creator.png`, `README.md`.
 
 ## Goal
 
-Dropload looks native on both the notch and the island, tells the user when a
+Downloady looks native on both the notch and the island, tells the user when a
 download ends, and passes review.
 
 ## Scope
@@ -32,7 +32,7 @@ download ends, and passes review.
 3. Global shortcut (optional, `global-shortcuts`): "Download current tab"
    with the current options. Drop it if it adds review risk.
 4. Remove any capability that ended up unused.
-5. Release assets: a real `Dropload.icon` (Icon Composer, readable at 28pt),
+5. Release assets: a real `Downloady.icon` (Icon Composer, readable at 28pt),
    the creator avatar, `droplet.json` `creator.url` and `source.repository`,
    and a README with usage, the tools policy (what is downloaded, from where,
    and how it is verified) and credits (yt-dlp: Unlicense; ffmpeg: LGPL/GPL

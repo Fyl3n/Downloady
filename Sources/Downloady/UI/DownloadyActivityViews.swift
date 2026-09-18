@@ -1,8 +1,8 @@
 //
-//  DroploadActivityViews.swift
-//  Dropload
+//  DownloadyActivityViews.swift
+//  Downloady
 //
-//  What Dropload draws outside the shelf: the compact live activity that
+//  What Downloady draws outside the shelf: the compact live activity that
 //  shows a running download, and the card the completion HUD grows into.
 //
 
@@ -31,9 +31,11 @@ struct DownloadActivityRing: View {
                     )
                 )
                 .rotationEffect(.degrees(-90))
-            Image(systemName: "arrow.down")
+            Image(systemName: glyph)
                 .font(.system(size: DroppyLiveActivityMetrics.progressRingGlyphSize, weight: .bold))
                 .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
+                .id(glyph)
+                .transition(DroppyTransition.compactContent)
         }
         .frame(
             width: DroppyLiveActivityMetrics.progressRingSize,
@@ -47,11 +49,11 @@ struct DownloadActivityRing: View {
     }
 
     private var fraction: Double {
-        switch model.phase {
-        case .downloading(let fraction, _, _): min(max(fraction, 0), 1)
-        case .postProcessing: 1
-        default: 0
-        }
+        min(max(model.summary.fraction, 0), 1)
+    }
+
+    private var glyph: String {
+        model.summary.leading?.isTranscribing == true ? "text.quote" : "arrow.down"
     }
 }
 
@@ -71,27 +73,19 @@ struct DownloadActivityValue: View {
             .animation(DroppyAnimation.state, value: label)
     }
 
-    private var label: String {
-        switch model.phase {
-        case .downloading(let fraction, _, _):
-            fraction.formatted(.percent.precision(.fractionLength(0)))
-        case .postProcessing:
-            "Finishing"
-        default:
-            ""
-        }
-    }
+    private var label: String { model.summary.activityLabel }
 }
 
 /// The card the completion HUD grows into: what landed, and where to see it.
 struct DownloadedHUDCard: View {
+    let title: String
     let name: String
     let reveal: () -> Void
 
     var body: some View {
         HStack(spacing: DroppySpacing.sm) {
             VStack(alignment: .leading, spacing: DroppySpacing.xs) {
-                Text("Downloaded")
+                Text(title)
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
                 Text(name)

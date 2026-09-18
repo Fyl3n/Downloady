@@ -1,6 +1,6 @@
 //
 //  YtDlpClient.swift
-//  Dropload
+//  Downloady
 //
 //  Runs yt-dlp as a child process. Never blocks the main actor: the droplet
 //  runs inside Droppy's process, on Droppy's main thread.
@@ -44,12 +44,38 @@ public protocol YtDlpRunning: AnyObject {
     /// `yt-dlp -J --no-playlist --skip-download <url>`, decoded.
     func fetchInfo(for url: URL) async throws -> MediaInfo
 
-    /// Downloads `url` into `folder`. Cancelling the consuming task
-    /// terminates the process.
-    func download(_ url: URL, options: DownloadOptions, into folder: URL) -> AsyncThrowingStream<DownloadEvent, Error>
+    /// Whether one of yt-dlp's dedicated extractors claims `url`, without
+    /// touching the network (`YtDlpCommand.supportProbe`). About half a
+    /// second. `false` when yt-dlp is not ready or the task is cancelled.
+    func isSupported(_ url: URL) async -> Bool
+
+    /// `yt-dlp --list-extractors`, offline. `nil` when yt-dlp is not ready
+    /// or fails.
+    func listExtractors() async -> String?
+
+    /// Downloads `url` into `folder`. `subtitleLanguage` is the track
+    /// yt-dlp is asked for when the options want subtitles. Cancelling the
+    /// consuming task terminates the process.
+    func download(
+        _ url: URL,
+        options: DownloadOptions,
+        into folder: URL,
+        subtitleLanguage: String
+    ) -> AsyncThrowingStream<DownloadEvent, Error>
 
     /// Terminates every child process. Called from `deactivate()`.
     func cancelAll()
+}
+
+public extension YtDlpRunning {
+    /// A download with no subtitles to pick a language for.
+    func download(
+        _ url: URL,
+        options: DownloadOptions,
+        into folder: URL
+    ) -> AsyncThrowingStream<DownloadEvent, Error> {
+        download(url, options: options, into: folder, subtitleLanguage: "en")
+    }
 }
 
 // MARK: - Arguments and output lines
@@ -58,7 +84,7 @@ public protocol YtDlpRunning: AnyObject {
 /// tests pin it.
 public enum YtDlpCommand {
     public static let progressTemplate =
-        "download:dropload %(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s"
+        "download:downloady %(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s"
     public static let outputTemplate = "%(title).200B [%(id)s].%(ext)s"
 
     /// The line yt-dlp prints before it writes a stream.
@@ -79,9 +105,39 @@ public enum YtDlpCommand {
         common(ffmpeg: ffmpeg) + ["-J", "--skip-download", "--", url.absoluteString]
     }
 
-    public static func download(_ url: URL, options: DownloadOptions, folder: URL, ffmpeg: URL?) -> [String] {
+    /// The compatibility probe: every extractor except the generic one, and
+    /// every request sent to a local port that refuses it. A URL that an
+    /// extractor claims fails on its first request (`ERROR: [youtube] …`); a
+    /// URL none claims fails before any ("No suitable extractor"). Either way
+    /// nothing leaves the Mac.
+    public static func supportProbe(_ url: URL) -> [String] {
+        [
+            "--no-playlist", "--no-colors", "--no-cache-dir",
+            "--ies", "default,-generic",
+            "--proxy", "http://127.0.0.1:9",
+            "--socket-timeout", "2", "--retries", "0", "--extractor-retries", "0",
+            "-J", "--skip-download",
+            "--", url.absoluteString,
+        ]
+    }
+
+    /// What the probe's exit says. Only an explicit "no extractor" is a no:
+    /// a yt-dlp too old for `--ies` falls back to the full lookup.
+    static func probeSaysSupported(status: Int32, stderr: String) -> Bool {
+        guard status != 0 else { return true }
+        return !stderr.contains("No suitable extractor") && !isUnsupported(stderr: stderr)
+    }
+
+    public static func download(
+        _ url: URL,
+        options: DownloadOptions,
+        folder: URL,
+        ffmpeg: URL?,
+        subtitleLanguage: String = "en"
+    ) -> [String] {
         common(ffmpeg: ffmpeg)
             + options.ytDlpArguments
+            + options.subtitleArguments(language: subtitleLanguage)
             + [
                 "-o", folder.appendingPathComponent(outputTemplate).path,
                 "--progress-template", progressTemplate,
@@ -129,9 +185,10 @@ public enum YtDlpCommand {
 
 // MARK: - Child process
 
-/// One running yt-dlp. Its pipes are read on background threads; it can be
-/// terminated from any thread.
-final class YtDlpProcess: @unchecked Sendable {
+/// One running tool, yt-dlp or ffmpeg. Its pipes are read on background
+/// threads; it can be terminated from any thread. Never started on the main
+/// actor: the droplet runs on Droppy's main thread.
+final class ChildProcess: @unchecked Sendable {
     struct Exit: Sendable {
         let status: Int32
         let reason: Process.TerminationReason
@@ -273,7 +330,7 @@ final class YtDlpProcess: @unchecked Sendable {
 public final class YtDlpClient: YtDlpRunning {
     private let tools: @MainActor () -> ToolStatus
     private let log: @MainActor (String) -> Void
-    private var running: [ObjectIdentifier: YtDlpProcess] = [:]
+    private var running: [ObjectIdentifier: ChildProcess] = [:]
 
     public init(tools: @escaping @MainActor () -> ToolStatus, log: @escaping @MainActor (String) -> Void) {
         self.tools = tools
@@ -281,23 +338,7 @@ public final class YtDlpClient: YtDlpRunning {
     }
 
     public func fetchInfo(for url: URL) async throws -> MediaInfo {
-        guard let ytDlp = tools().ytDlp else { throw YtDlpError.toolsNotReady }
-        let child = YtDlpProcess(
-            executable: ytDlp.url,
-            arguments: YtDlpCommand.fetchInfo(url, ffmpeg: tools().ffmpeg?.url)
-        )
-        let key = track(child)
-        defer { running[key] = nil }
-
-        let (exit, data): (YtDlpProcess.Exit, Data) = try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
-                child.start(collectStdout: true, onLine: { _ in }) { continuation.resume(with: $0) }
-            }
-        } onCancel: {
-            child.terminate()
-        }
-
-        if Task.isCancelled || child.wasTerminated { throw YtDlpError.cancelled }
+        let (exit, data) = try await runToEnd(YtDlpCommand.fetchInfo(url, ffmpeg: tools().ffmpeg?.url))
         guard exit.status == 0 else {
             if YtDlpCommand.isUnsupported(stderr: exit.stderr) { throw YtDlpError.unsupportedURL }
             let message = YtDlpCommand.errorMessage(fromStderr: exit.stderr)
@@ -311,17 +352,59 @@ public final class YtDlpClient: YtDlpRunning {
         return info
     }
 
+    public func isSupported(_ url: URL) async -> Bool {
+        guard let exit = try? await runToEnd(YtDlpCommand.supportProbe(url)).0 else { return false }
+        let supported = YtDlpCommand.probeSaysSupported(status: exit.status, stderr: exit.stderr)
+        log("\(url.host() ?? url.absoluteString) is \(supported ? "" : "not ")supported by yt-dlp")
+        return supported
+    }
+
+    public func listExtractors() async -> String? {
+        guard let result = try? await runToEnd(["--list-extractors"]), result.0.status == 0 else { return nil }
+        return String(decoding: result.1, as: UTF8.self)
+    }
+
+    /// Runs yt-dlp with `arguments` and collects stdout. Cancelling the task
+    /// terminates the process.
+    private func runToEnd(_ arguments: [String]) async throws -> (ChildProcess.Exit, Data) {
+        guard let ytDlp = tools().ytDlp else { throw YtDlpError.toolsNotReady }
+        let child = ChildProcess(executable: ytDlp.url, arguments: arguments)
+        let key = track(child)
+        defer { running[key] = nil }
+
+        let result: (ChildProcess.Exit, Data) = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                child.start(collectStdout: true, onLine: { _ in }) { continuation.resume(with: $0) }
+            }
+        } onCancel: {
+            child.terminate()
+        }
+        if Task.isCancelled || child.wasTerminated { throw YtDlpError.cancelled }
+        return result
+    }
+
     /// Decoding a large `-J` document is not free; keep it off the main actor.
     nonisolated private static func decode(_ data: Data) async throws -> MediaInfo {
         try JSONDecoder().decode(MediaInfo.self, from: data)
     }
 
-    public func download(_ url: URL, options: DownloadOptions, into folder: URL) -> AsyncThrowingStream<DownloadEvent, Error> {
+    public func download(
+        _ url: URL,
+        options: DownloadOptions,
+        into folder: URL,
+        subtitleLanguage: String
+    ) -> AsyncThrowingStream<DownloadEvent, Error> {
         guard let ytDlp = tools().ytDlp else {
             return AsyncThrowingStream { $0.finish(throwing: YtDlpError.toolsNotReady) }
         }
-        let arguments = YtDlpCommand.download(url, options: options, folder: folder, ffmpeg: tools().ffmpeg?.url)
-        let child = YtDlpProcess(executable: ytDlp.url, arguments: arguments)
+        let arguments = YtDlpCommand.download(
+            url,
+            options: options,
+            folder: folder,
+            ffmpeg: tools().ffmpeg?.url,
+            subtitleLanguage: subtitleLanguage
+        )
+        let child = ChildProcess(executable: ytDlp.url, arguments: arguments)
         let key = track(child)
         let log = self.log
 
@@ -379,7 +462,7 @@ public final class YtDlpClient: YtDlpRunning {
         running.removeAll()
     }
 
-    private func track(_ child: YtDlpProcess) -> ObjectIdentifier {
+    private func track(_ child: ChildProcess) -> ObjectIdentifier {
         let key = ObjectIdentifier(child)
         running[key] = child
         return key
@@ -394,10 +477,10 @@ public final class YtDlpClient: YtDlpRunning {
 
 /// Turns one `--progress-template` line into an event.
 ///
-/// Input looks like `dropload  42.3%|  3.10MiB/s|00:12`; any other line gives
+/// Input looks like `downloady  42.3%|  3.10MiB/s|00:12`; any other line gives
 /// `nil`. yt-dlp writes `NA` (or `Unknown`) for a field it does not know.
 public enum ProgressParser {
-    public static let prefix = "dropload "
+    public static let prefix = "downloady "
 
     public static func parse(_ line: String) -> DownloadEvent? {
         guard line.hasPrefix(prefix) else { return nil }

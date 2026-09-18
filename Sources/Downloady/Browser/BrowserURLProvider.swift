@@ -1,6 +1,6 @@
 //
 //  BrowserURLProvider.swift
-//  Dropload
+//  Downloady
 //
 //  Reads the front tab's URL from the frontmost browser, so the URL bar can
 //  fill itself in. Uses Apple events (`apple-events` capability); the first
@@ -102,7 +102,7 @@ public final class BrowserURLProvider: BrowserURLProviding {
     /// The most recent frontmost supported browser.
     public private(set) var lastBrowser: SupportedBrowser?
 
-    nonisolated private static let queue = DispatchQueue(label: "dropload.browser-url", qos: .userInitiated)
+    nonisolated private static let queue = DispatchQueue(label: "downloady.browser-url", qos: .userInitiated)
 
     public init(log: @escaping @MainActor (String) -> Void) {
         self.log = log
@@ -227,5 +227,49 @@ public final class BrowserURLProvider: BrowserURLProviding {
               url.host?.isEmpty == false
         else { return nil }
         return url
+    }
+}
+
+// MARK: - Automation permission
+
+/// Where macOS's Automation permission stands for one browser.
+public enum BrowserAutomationStatus: Equatable, Sendable {
+    case allowed
+    case denied
+    /// macOS has not asked yet; the first read of the tab will.
+    case notAsked
+    /// The browser is not running, so macOS cannot say.
+    case unknown
+}
+
+/// Asks macOS, per browser, whether Droppy may send it Apple events.
+/// Never on the main actor: with `ask` the call waits for the user's answer.
+public enum BrowserAutomation {
+    nonisolated private static let queue = DispatchQueue(label: "downloady.browser-automation", qos: .userInitiated)
+
+    /// `errAEEventWouldRequireUserConsent`
+    nonisolated static let wouldRequireConsentError: OSStatus = -1744
+
+    public static func status(of browser: SupportedBrowser, ask: Bool) async -> BrowserAutomationStatus {
+        let bundleID = browser.bundleID
+        guard !NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).isEmpty else {
+            return .unknown
+        }
+        return await withCheckedContinuation { continuation in
+            queue.async {
+                let target = NSAppleEventDescriptor(bundleIdentifier: bundleID)
+                let status = AEDeterminePermissionToAutomateTarget(target.aeDesc, typeWildCard, typeWildCard, ask)
+                continuation.resume(returning: Self.status(for: status))
+            }
+        }
+    }
+
+    nonisolated static func status(for osStatus: OSStatus) -> BrowserAutomationStatus {
+        switch osStatus {
+        case noErr: .allowed
+        case OSStatus(BrowserURLProvider.notAuthorizedError): .denied
+        case wouldRequireConsentError: .notAsked
+        default: .unknown
+        }
     }
 }

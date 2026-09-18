@@ -1,4 +1,4 @@
-# Dropload, a Droplet for Droppy
+# Downloady, a Droplet for Droppy
 
 <!-- Written by `droppykit agent`. Add your own notes below; the file is only rewritten with --force. -->
 
@@ -7,8 +7,8 @@ Dynamic Island and shelf for Mac, written in SwiftUI against **DroppyKit**.
 Droppy loads the built `.droplet` bundle into its own process and draws it on
 the notch, the shelf, the lock screen and the menu bar.
 
-- Droplet id: `dropload`. It is also `DroploadDroplet.id` in Swift and `id` in `droplet.json`; the three must agree or the loader refuses the bundle.
-- Swift product: `Dropload`, a dynamic library. The harness target is `DroploadHarness`.
+- Droplet id: `downloady`. It is also `DownloadyDroplet.id` in Swift and `id` in `droplet.json`; the three must agree or the loader refuses the bundle.
+- Swift product: `Downloady`, a dynamic library. The harness target is `DownloadyHarness`.
 - SDK checkout: `~/Documents/droppykit` (DroppyKit 1.8.1). Docs online: https://getdroppy.app/docs/droppykit
 - Host: Droppy 15.3 or later, which runs an unsigned bundle once its user approves that build under Settings, Store, Local droplets and asks again each time it opens, or the free Droppy Playground (https://getdroppy.app/download/playground), which loads unsigned bundles without asking.
 
@@ -17,8 +17,8 @@ the notch, the shelf, the lock screen and the menu bar.
 Every change goes through all of this, in order. A droplet can compile,
 validate and then draw nothing, so a green build is not the end.
 
-1. Edit `Sources/Dropload/`. The manifest is `droplet.json`.
-2. `droppykit build` writes `.build/Dropload.droplet`, universal, linked against the
+1. Edit `Sources/Downloady/`. The manifest is `droplet.json`.
+2. `droppykit build` writes `.build/Downloady.droplet`, universal, linked against the
    framework Droppy ships. Never a bare `swift build` for the bundle: it folds a second
    copy of DroppyKit into the droplet, and that bundle loads in the harness and dies
    inside Droppy at dyld with "Symbol not found".
@@ -28,8 +28,8 @@ validate and then draw nothing, so a green build is not the end.
    Read `report.json`: `problems` must be empty and every surface you declared must be
    `provided`.
 5. Put the bundle into Droppy Playground and confirm it loaded. Copy
-   `.build/Dropload.droplet` to
-   `~/Library/Application Support/Droppy Playground/Droplets/dropload/Dropload.droplet`,
+   `.build/Downloady.droplet` to
+   `~/Library/Application Support/Droppy Playground/Droplets/downloady/Downloady.droplet`,
    relaunch the Playground, and read its Store row: the subtitle is the loader's verdict.
 
 With the DroppyKit MCP server connected, the same steps are the tools `droppykit_build`,
@@ -107,10 +107,10 @@ package pins; `droppykit update` moves both to the newest release. A build that 
 - **Host calls are gated by `capabilities`.** A service call without its capability in
   `droplet.json` is refused: it returns `false` or `nil` and logs one line. Declare what you
   use and only that; the user sees the list.
-- **The principal class does nothing.** `DroploadPrincipal` is `@objc`, is named in the
+- **The principal class does nothing.** `DownloadyPrincipal` is `@objc`, is named in the
   bundle's `NSPrincipalClass`, and only creates the droplet. It runs before the host is ready.
 - **No `main.swift`.** The harness entry is `@main` in
-  `Sources/DroploadHarness/DroploadHarness.swift`, and a file named `main.swift` cannot
+  `Sources/DownloadyHarness/DownloadyHarness.swift`, and a file named `main.swift` cannot
   coexist with `@main`.
 - **Look like Droppy, not like a guest.** Surfaces are dark. Foreground colours come from
   `AdaptiveColors`, spacing from `DroppySpacing`, radii from `DroppyRadius` with
@@ -170,13 +170,13 @@ call in order, refused ones marked.
 ## Package layout
 
 ```
-Package.swift                     product Dropload (dynamic) and DroploadHarness
+Package.swift                     product Downloady (dynamic) and DownloadyHarness
 droplet.json                      the manifest; Info.plist is generated from it
-Sources/Dropload/              the droplet
-Sources/DroploadHarness/       the @main harness entry; never main.swift
-Dropload.icon/                 Icon Composer document, required
+Sources/Downloady/              the droplet
+Sources/DownloadyHarness/       the @main harness entry; never main.swift
+Downloady.icon/                 Icon Composer document, required
 Assets/Creator.png                square creator avatar, at least 256px, required
-.build/Dropload.droplet        what droppykit build writes
+.build/Downloady.droplet        what droppykit build writes
 AGENTS.md, CLAUDE.md, .cursor/    this brief and the agent wiring
 .mcp.json, .cursor/mcp.json       the DroppyKit MCP server; absolute paths for this Mac
 ```
@@ -190,9 +190,9 @@ When the droplet is done: replace the placeholder icon and creator avatar, fill 
 `creator` and `source` in `droplet.json`, push the repository, and run `droppykit submit`. It
 opens getdroppy.app/submit-droplet with the repository, commit and id filled in.
 
-## Dropload project notes
+## Downloady project notes
 
 - The plan and the tickets are in `docs/PLAN.md` and `docs/tickets/`. Work one ticket at a time, and remove its `TODO(T<n>)` markers as you go (`grep -rn "TODO(T" Sources`).
-- All droplet code stays in the single `Dropload` target: `droppykit build` links only that module's objects. Pure logic is tested in `Tests/DroploadTests` (`swift test`).
+- All droplet code stays in the single `Downloady` target: `droppykit build` links only that module's objects. Pure logic is tested in `Tests/DownloadyTests` (`swift test`).
 - yt-dlp and ffmpeg never go inside the bundle. They live in `host.environment.containerDirectory/tools/`.
 - Never run a `Process` or `NSAppleScript` on the main actor. Droplets share Droppy's main thread.

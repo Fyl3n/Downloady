@@ -1,14 +1,15 @@
 //
 //  ToolManager.swift
-//  Dropload
+//  Downloady
 //
 //  Where yt-dlp and ffmpeg come from.
 //
-//  yt-dlp: the user's custom path, or the droplet's own copy, downloaded on
-//  first run into `host.environment.containerDirectory/tools/`, never into
-//  the bundle (Droppy refuses a bundle whose files changed after approval).
-//  ffmpeg: a custom path, a system copy when there is one, otherwise a
-//  downloaded static build in the same folder.
+//  Each tool comes from one source the user picks in Settings: the copy
+//  Downloady downloads into `host.environment.containerDirectory/tools/`
+//  (never into the bundle: Droppy refuses a bundle whose files changed after
+//  approval), the one installed on the Mac, or a custom path.
+//  yt-dlp defaults to Downloady's copy, installed on first run; ffmpeg
+//  defaults to the Mac's copy, and to Downloady's when the Mac has none.
 //
 
 import CryptoKit
@@ -16,7 +17,7 @@ import Foundation
 
 /// A located executable and where it came from.
 public struct ToolLocation: Equatable, Sendable {
-    public enum Source: String, Sendable {
+    public enum Source: String, Sendable, CaseIterable {
         /// Downloaded by the droplet into its container.
         case managed
         /// Found on the system (Homebrew, /usr/local, PATH).
@@ -24,14 +25,22 @@ public struct ToolLocation: Equatable, Sendable {
         /// A path the user set in Settings.
         case custom
 
-        /// How Settings names it.
+        /// The segment in Settings' source picker.
         public var title: String {
             switch self {
-            case .managed: "Downloaded"
-            case .system: "System"
+            case .managed: "Downloady"
+            case .system: "This Mac"
             case .custom: "Custom"
             }
         }
+    }
+
+    /// The two external tools.
+    public enum Tool: String, Sendable, CaseIterable {
+        case ytDlp = "yt-dlp"
+        case ffmpeg
+
+        public var name: String { rawValue }
     }
 
     public let url: URL
@@ -42,6 +51,27 @@ public struct ToolLocation: Equatable, Sendable {
         self.url = url
         self.source = source
         self.version = version
+    }
+}
+
+/// Where the user wants each tool to come from. `ffmpegSource == nil` is the
+/// default: the Mac's ffmpeg when there is one, otherwise Downloady's.
+public struct ToolChoices: Equatable, Sendable {
+    public var ytDlpSource: ToolLocation.Source
+    public var ffmpegSource: ToolLocation.Source?
+    public var ytDlpPath: String?
+    public var ffmpegPath: String?
+
+    public init(
+        ytDlpSource: ToolLocation.Source = .managed,
+        ffmpegSource: ToolLocation.Source? = nil,
+        ytDlpPath: String? = nil,
+        ffmpegPath: String? = nil
+    ) {
+        self.ytDlpSource = ytDlpSource
+        self.ffmpegSource = ffmpegSource
+        self.ytDlpPath = ytDlpPath
+        self.ffmpegPath = ffmpegPath
     }
 }
 
@@ -80,7 +110,7 @@ public enum ToolError: Error, Equatable, LocalizedError {
 
     public var errorDescription: String? {
         switch self {
-        case .notPermitted: "Network access is turned off for Dropload"
+        case .notPermitted: "Network access is turned off for Downloady"
         case .insecureURL(let url): "Refused a download that is not HTTPS: \(url)"
         case .httpStatus(let code, let name): "Download of \(name) failed (HTTP \(code))"
         case .checksumMissing(let name): "No checksum published for \(name)"
@@ -97,12 +127,23 @@ public protocol ToolManaging: AnyObject {
     /// Current state, without touching the network.
     func resolve() async -> ToolStatus
 
-    /// Where ffmpeg would come from, even while yt-dlp is missing. No version.
-    func locateFFmpeg() -> ToolLocation?
+    /// ffmpeg with its version, looked up on its own so a missing yt-dlp
+    /// does not hide it.
+    func resolveFFmpeg() async -> ToolLocation?
 
-    /// Downloads whatever is missing (yt-dlp, and ffmpeg when the system has
-    /// none), verifying checksums, and reports progress through `progress`.
+    /// The copy of `tool` installed on the Mac, if any. File checks only.
+    func systemCopy(of tool: ToolLocation.Tool) -> URL?
+
+    /// The tools set to Downloady's copy whose copy is not there yet.
+    func missingManagedTools() -> Set<ToolLocation.Tool>
+
+    /// Downloads the tools set to Downloady's copy that are missing,
+    /// verifying checksums, and reports progress through `progress`.
     func installMissing(progress: @escaping @MainActor (Double) -> Void) async throws -> ToolStatus
+
+    /// The newer yt-dlp release tag, or `nil` when the managed copy is
+    /// current or yt-dlp is not managed by Downloady. Installs nothing.
+    func availableYtDlpUpdate() async throws -> String?
 
     /// Re-downloads the managed yt-dlp when a newer release exists.
     func updateYtDlp() async throws -> ToolStatus
@@ -140,43 +181,63 @@ public enum ChecksumList {
     }
 }
 
-/// The order tools are looked up in.
+/// Where each source looks. Every lookup is strict: a tool set to one
+/// source never quietly comes from another.
 public enum ToolLookup {
-    public static let systemFFmpegPaths = ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"]
-
-    /// yt-dlp: the custom path, then the managed onedir copy.
-    public static func ytDlp(
-        custom: String?,
-        managed: URL,
-        isExecutable: (String) -> Bool
-    ) -> (url: URL, source: ToolLocation.Source)? {
-        if let custom = normalized(custom), isExecutable(custom) {
-            return (URL(fileURLWithPath: custom), .custom)
-        }
-        if isExecutable(managed.path) { return (managed, .managed) }
-        return nil
-    }
-
-    /// ffmpeg: the custom path, Homebrew, /usr/local, `PATH`, then the managed copy.
-    public static func ffmpeg(
-        custom: String?,
+    /// Homebrew (Apple silicon, then Intel), pipx, then each `PATH` entry.
+    /// Droppy started from Finder has a short `PATH`, hence the fixed ones.
+    public static func systemCandidates(
+        named name: String,
         pathVariable: String?,
-        managed: URL,
-        isExecutable: (String) -> Bool
-    ) -> (url: URL, source: ToolLocation.Source)? {
-        if let custom = normalized(custom), isExecutable(custom) {
-            return (URL(fileURLWithPath: custom), .custom)
-        }
-        var candidates = systemFFmpegPaths
+        home: String = NSHomeDirectory()
+    ) -> [String] {
+        var candidates = ["/opt/homebrew/bin/\(name)", "/usr/local/bin/\(name)", "\(home)/.local/bin/\(name)"]
         for directory in (pathVariable ?? "").split(separator: ":") where !directory.isEmpty {
-            let path = URL(fileURLWithPath: String(directory)).appendingPathComponent("ffmpeg").path
+            let path = URL(fileURLWithPath: String(directory)).appendingPathComponent(name).path
             if !candidates.contains(path) { candidates.append(path) }
         }
-        for path in candidates where path != managed.path && isExecutable(path) {
-            return (URL(fileURLWithPath: path), .system)
+        return candidates
+    }
+
+    /// The first system candidate that is an executable, skipping the
+    /// managed copy should `PATH` ever point into the container.
+    public static func systemCopy(
+        in candidates: [String],
+        excluding managed: URL,
+        isExecutable: (String) -> Bool
+    ) -> URL? {
+        candidates.first { $0 != managed.path && isExecutable($0) }.map { URL(fileURLWithPath: $0) }
+    }
+
+    /// The tool as `source` provides it, or `nil` when that source has none.
+    public static func locate(
+        source: ToolLocation.Source,
+        custom: String?,
+        systemCandidates: [String],
+        managed: URL,
+        isExecutable: (String) -> Bool
+    ) -> URL? {
+        switch source {
+        case .custom:
+            guard let custom = normalized(custom), isExecutable(custom) else { return nil }
+            return URL(fileURLWithPath: custom)
+        case .system:
+            return systemCopy(in: systemCandidates, excluding: managed, isExecutable: isExecutable)
+        case .managed:
+            return isExecutable(managed.path) ? managed : nil
         }
-        if isExecutable(managed.path) { return (managed, .managed) }
-        return nil
+    }
+
+    /// The source a choice stands for: `nil` (ffmpeg's default) is the
+    /// Mac's copy when there is one, otherwise Downloady's.
+    public static func effectiveSource(
+        _ chosen: ToolLocation.Source?,
+        systemCandidates: [String],
+        managed: URL,
+        isExecutable: (String) -> Bool
+    ) -> ToolLocation.Source {
+        if let chosen { return chosen }
+        return systemCopy(in: systemCandidates, excluding: managed, isExecutable: isExecutable) != nil ? .system : .managed
     }
 
     static func normalized(_ path: String?) -> String? {
@@ -400,8 +461,8 @@ enum ToolProcess {
 /// - yt-dlp: `yt-dlp_macos.zip` (onedir build, starts much faster than the
 ///   onefile `yt-dlp_macos`) from a GitHub release, verified against that
 ///   release's `SHA2-256SUMS`, unpacked into `<container>/tools/yt-dlp/`.
-/// - ffmpeg: custom path, /opt/homebrew/bin, /usr/local/bin, PATH; else a
-///   static build for the running architecture from ffmpeg.martin-riedl.de,
+/// - ffmpeg: a static build for the running architecture from
+///   ffmpeg.martin-riedl.de, when set to Downloady's copy,
 ///   verified against its published `.sha256`, at `<container>/tools/ffmpeg`.
 @MainActor
 public final class ToolManager: ToolManaging {
@@ -431,7 +492,7 @@ public final class ToolManager: ToolManaging {
     private let containerDirectory: URL
     private let configuration: Configuration
     private let fetcher: ToolFetching
-    private let customPaths: @MainActor () -> (ytDlp: String?, ffmpeg: String?)
+    private let choices: @MainActor () -> ToolChoices
     private let networkGranted: @MainActor () -> Bool
     private let log: @MainActor (String) -> Void
     private let fileManager = FileManager.default
@@ -440,14 +501,14 @@ public final class ToolManager: ToolManaging {
         containerDirectory: URL,
         configuration: Configuration = Configuration(),
         fetcher: ToolFetching? = nil,
-        customPaths: @escaping @MainActor () -> (ytDlp: String?, ffmpeg: String?) = { (nil, nil) },
+        choices: @escaping @MainActor () -> ToolChoices = { ToolChoices() },
         networkGranted: @escaping @MainActor () -> Bool = { true },
         log: @escaping @MainActor (String) -> Void
     ) {
         self.containerDirectory = containerDirectory
         self.configuration = configuration
         self.fetcher = fetcher ?? URLSessionToolFetcher()
-        self.customPaths = customPaths
+        self.choices = choices
         self.networkGranted = networkGranted
         self.log = log
     }
@@ -468,18 +529,60 @@ public final class ToolManager: ToolManaging {
 
     // MARK: Resolve
 
-    public func resolve() async -> ToolStatus {
-        let paths = customPaths()
-        let isExecutable = Self.isExecutableFile
-        guard let ytDlp = ToolLookup.ytDlp(custom: paths.ytDlp, managed: managedYtDlp, isExecutable: isExecutable) else {
-            return .missing
-        }
-        let ffmpeg = ToolLookup.ffmpeg(
-            custom: paths.ffmpeg,
-            pathVariable: ProcessInfo.processInfo.environment["PATH"],
-            managed: managedFFmpeg,
-            isExecutable: isExecutable
+    private func candidates(for tool: ToolLocation.Tool) -> [String] {
+        ToolLookup.systemCandidates(
+            named: tool == .ytDlp ? "yt-dlp" : "ffmpeg",
+            pathVariable: ProcessInfo.processInfo.environment["PATH"]
         )
+    }
+
+    private func managedURL(for tool: ToolLocation.Tool) -> URL {
+        tool == .ytDlp ? managedYtDlp : managedFFmpeg
+    }
+
+    /// The source `tool` comes from right now, ffmpeg's default resolved.
+    func source(for tool: ToolLocation.Tool, in choices: ToolChoices) -> ToolLocation.Source {
+        switch tool {
+        case .ytDlp:
+            return choices.ytDlpSource
+        case .ffmpeg:
+            return ToolLookup.effectiveSource(
+                choices.ffmpegSource,
+                systemCandidates: candidates(for: .ffmpeg),
+                managed: managedFFmpeg,
+                isExecutable: Self.isExecutableFile
+            )
+        }
+    }
+
+    /// Where `tool` is, from the source the user picked, without a version.
+    func locate(_ tool: ToolLocation.Tool, in choices: ToolChoices) -> ToolLocation? {
+        let source = source(for: tool, in: choices)
+        let url = ToolLookup.locate(
+            source: source,
+            custom: tool == .ytDlp ? choices.ytDlpPath : choices.ffmpegPath,
+            systemCandidates: candidates(for: tool),
+            managed: managedURL(for: tool),
+            isExecutable: Self.isExecutableFile
+        )
+        return url.map { ToolLocation(url: $0, source: source, version: nil) }
+    }
+
+    public func systemCopy(of tool: ToolLocation.Tool) -> URL? {
+        ToolLookup.systemCopy(in: candidates(for: tool), excluding: managedURL(for: tool), isExecutable: Self.isExecutableFile)
+    }
+
+    public func missingManagedTools() -> Set<ToolLocation.Tool> {
+        let choices = choices()
+        return Set(ToolLocation.Tool.allCases.filter {
+            source(for: $0, in: choices) == .managed && locate($0, in: choices) == nil
+        })
+    }
+
+    public func resolve() async -> ToolStatus {
+        let choices = choices()
+        guard let ytDlp = locate(.ytDlp, in: choices) else { return .missing }
+        let ffmpeg = locate(.ffmpeg, in: choices)
 
         let timeout = configuration.versionTimeout
         let ffmpegURL = ffmpeg?.url
@@ -498,13 +601,11 @@ public final class ToolManager: ToolManaging {
         )
     }
 
-    public func locateFFmpeg() -> ToolLocation? {
-        ToolLookup.ffmpeg(
-            custom: customPaths().ffmpeg,
-            pathVariable: ProcessInfo.processInfo.environment["PATH"],
-            managed: managedFFmpeg,
-            isExecutable: Self.isExecutableFile
-        ).map { ToolLocation(url: $0.url, source: $0.source, version: nil) }
+    public func resolveFFmpeg() async -> ToolLocation? {
+        guard let ffmpeg = locate(.ffmpeg, in: choices()) else { return nil }
+        let result = await ToolProcess.run(ffmpeg.url, ["-version"], timeout: configuration.versionTimeout)
+        let version = result.flatMap { ToolVersion.ffmpeg(fromFirstLine: $0.output) }
+        return ToolLocation(url: ffmpeg.url, source: ffmpeg.source, version: version)
     }
 
     nonisolated private static func runIfPresent(_ url: URL?, _ arguments: [String], timeout: TimeInterval) async -> ToolProcess.Result? {
@@ -524,16 +625,11 @@ public final class ToolManager: ToolManaging {
 
     public func installMissing(progress: @escaping @MainActor (Double) -> Void) async throws -> ToolStatus {
         guard networkGranted() else { throw ToolError.notPermitted }
-        let paths = customPaths()
-        let needsYtDlp = ToolLookup.ytDlp(custom: paths.ytDlp, managed: managedYtDlp, isExecutable: Self.isExecutableFile) == nil
-        let needsFFmpeg = ToolLookup.ffmpeg(
-            custom: paths.ffmpeg,
-            pathVariable: ProcessInfo.processInfo.environment["PATH"],
-            managed: managedFFmpeg,
-            isExecutable: Self.isExecutableFile
-        ) == nil
+        let missing = missingManagedTools()
+        let needsYtDlp = missing.contains(.ytDlp)
+        let needsFFmpeg = missing.contains(.ffmpeg)
 
-        let share = needsFFmpeg ? Self.ytDlpProgressShare : 1
+        let share = needsFFmpeg ? (needsYtDlp ? Self.ytDlpProgressShare : 0) : 1
         progress(0)
         if needsYtDlp {
             let tag = try await latestYtDlpTag()
@@ -547,7 +643,7 @@ public final class ToolManager: ToolManaging {
                 try await installFFmpeg { progress(share + $0 * (1 - share)) }
             } catch is CancellationError {
                 throw CancellationError()
-            } catch {
+            } catch where needsYtDlp {
                 // ffmpeg only matters for merging and converting; yt-dlp still works.
                 log("ffmpeg install failed: \(error.localizedDescription)")
             }
@@ -556,11 +652,18 @@ public final class ToolManager: ToolManaging {
         return await resolve()
     }
 
+    public func availableYtDlpUpdate() async throws -> String? {
+        guard networkGranted() else { throw ToolError.notPermitted }
+        guard let location = await resolve().ytDlp, location.source == .managed else { return nil }
+        let tag = try await latestYtDlpTag()
+        return ToolVersion.isNewer(tag, than: location.version) ? tag : nil
+    }
+
     public func updateYtDlp() async throws -> ToolStatus {
         guard networkGranted() else { throw ToolError.notPermitted }
         let current = await resolve()
-        if let location = current.ytDlp, location.source == .custom {
-            log("yt-dlp comes from a custom path; not updating it")
+        if let location = current.ytDlp, location.source != .managed {
+            log("yt-dlp is not Downloady's copy; not updating it")
             return current
         }
         let tag = try await latestYtDlpTag()

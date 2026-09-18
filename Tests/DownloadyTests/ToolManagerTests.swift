@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import Dropload
+@testable import Downloady
 
 @Suite struct ChecksumListTests {
     @Test func parsesSha2SumsLines() {
@@ -30,39 +30,43 @@ import Testing
 @Suite struct ToolLookupTests {
     let managed = URL(fileURLWithPath: "/c/tools/ffmpeg")
 
-    @Test func ffmpegPrefersCustomThenHomebrewThenLocalThenPathThenManaged() {
-        var present: Set<String> = ["/custom/ffmpeg", "/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/p/bin/ffmpeg", managed.path]
-        func locate() -> (URL, ToolLocation.Source)? {
-            ToolLookup.ffmpeg(custom: "/custom/ffmpeg", pathVariable: "/x:/p/bin", managed: managed) { present.contains($0) }
-                .map { ($0.url, $0.source) }
+    @Test func systemCandidatesAreHomebrewThenPipxThenPath() {
+        let candidates = ToolLookup.systemCandidates(named: "yt-dlp", pathVariable: "/x:/usr/local/bin:", home: "/Users/me")
+        #expect(candidates == [
+            "/opt/homebrew/bin/yt-dlp", "/usr/local/bin/yt-dlp", "/Users/me/.local/bin/yt-dlp", "/x/yt-dlp",
+        ])
+    }
+
+    @Test func eachSourceIsStrict() {
+        let candidates = ToolLookup.systemCandidates(named: "ffmpeg", pathVariable: "/p/bin", home: "/h")
+        var present: Set<String> = ["/custom/ffmpeg", "/usr/local/bin/ffmpeg", managed.path]
+        func locate(_ source: ToolLocation.Source, custom: String? = "/custom/ffmpeg") -> String? {
+            ToolLookup.locate(source: source, custom: custom, systemCandidates: candidates, managed: managed) {
+                present.contains($0)
+            }?.path
         }
-        #expect(locate()?.0.path == "/custom/ffmpeg")
-        #expect(locate()?.1 == .custom)
-        present.remove("/custom/ffmpeg")
-        #expect(locate()?.0.path == "/opt/homebrew/bin/ffmpeg")
-        #expect(locate()?.1 == .system)
-        present.remove("/opt/homebrew/bin/ffmpeg")
-        #expect(locate()?.0.path == "/usr/local/bin/ffmpeg")
-        present.remove("/usr/local/bin/ffmpeg")
-        #expect(locate()?.0.path == "/p/bin/ffmpeg")
-        #expect(locate()?.1 == .system)
-        present.remove("/p/bin/ffmpeg")
-        #expect(locate()?.0 == managed)
-        #expect(locate()?.1 == .managed)
-        present.remove(managed.path)
-        #expect(locate() == nil)
+        #expect(locate(.custom) == "/custom/ffmpeg")
+        #expect(locate(.system) == "/usr/local/bin/ffmpeg")
+        #expect(locate(.managed) == managed.path)
+        #expect(locate(.custom, custom: "  ") == nil)
+        present = []
+        // Nothing falls through to another source.
+        #expect(locate(.custom) == nil)
+        #expect(locate(.system) == nil)
+        #expect(locate(.managed) == nil)
     }
 
-    @Test func ffmpegIgnoresBlankCustomPath() {
-        let found = ToolLookup.ffmpeg(custom: "  ", pathVariable: nil, managed: managed) { $0 == "/usr/local/bin/ffmpeg" }
-        #expect(found?.url.path == "/usr/local/bin/ffmpeg")
+    @Test func systemCopyPrefersHomebrewAndSkipsTheManagedCopy() {
+        let candidates = [managed.path, "/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"]
+        let found = ToolLookup.systemCopy(in: candidates, excluding: managed) { _ in true }
+        #expect(found?.path == "/opt/homebrew/bin/ffmpeg")
     }
 
-    @Test func ytDlpUsesCustomThenManaged() {
-        let managed = URL(fileURLWithPath: "/c/tools/yt-dlp/yt-dlp_macos")
-        #expect(ToolLookup.ytDlp(custom: "/bin/yt", managed: managed) { _ in true }?.source == .custom)
-        #expect(ToolLookup.ytDlp(custom: "/bin/yt", managed: managed) { $0 == managed.path }?.source == .managed)
-        #expect(ToolLookup.ytDlp(custom: nil, managed: managed) { _ in false } == nil)
+    @Test func defaultFFmpegSourceIsTheMacsThenDownloadys() {
+        let candidates = ["/opt/homebrew/bin/ffmpeg"]
+        #expect(ToolLookup.effectiveSource(nil, systemCandidates: candidates, managed: managed) { _ in true } == .system)
+        #expect(ToolLookup.effectiveSource(nil, systemCandidates: candidates, managed: managed) { _ in false } == .managed)
+        #expect(ToolLookup.effectiveSource(.custom, systemCandidates: candidates, managed: managed) { _ in true } == .custom)
     }
 }
 
@@ -104,7 +108,7 @@ final class FakeFetcher: ToolFetching, @unchecked Sendable {
 @MainActor
 @Suite struct ToolManagerInstallTests {
     @Test func checksumMismatchInstallsNothing() async throws {
-        let container = FileManager.default.temporaryDirectory.appendingPathComponent("dropload-\(UUID().uuidString)")
+        let container = FileManager.default.temporaryDirectory.appendingPathComponent("downloady-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: container) }
         let fetcher = FakeFetcher(files: [
             "yt-dlp_macos.zip": Data("not the real archive".utf8),
@@ -113,7 +117,7 @@ final class FakeFetcher: ToolFetching, @unchecked Sendable {
         let manager = ToolManager(
             containerDirectory: container,
             fetcher: fetcher,
-            customPaths: { (nil, "/usr/bin/true") },
+            choices: { ToolChoices(ffmpegSource: .custom, ffmpegPath: "/usr/bin/true") },
             log: { _ in }
         )
         await #expect(throws: ToolError.checksumMismatch("yt-dlp_macos.zip")) {
@@ -136,13 +140,14 @@ final class FakeFetcher: ToolFetching, @unchecked Sendable {
         }
     }
 
-    /// Real download, opt-in: `DROPLOAD_NETWORK_TESTS=1 swift test`.
-    @Test(.enabled(if: ProcessInfo.processInfo.environment["DROPLOAD_NETWORK_TESTS"] == "1"))
+    /// Real download, opt-in: `DOWNLOADY_NETWORK_TESTS=1 swift test`.
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["DOWNLOADY_NETWORK_TESTS"] == "1"))
     func installsRealYtDlp() async throws {
-        let container = FileManager.default.temporaryDirectory.appendingPathComponent("dropload-net-\(UUID().uuidString)")
+        let container = FileManager.default.temporaryDirectory.appendingPathComponent("downloady-net-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: container) }
         let manager = ToolManager(containerDirectory: container, log: { print($0) })
         #expect(await manager.resolve() == .missing)
+        #expect(manager.missingManagedTools().contains(.ytDlp))
         var seen: [Double] = []
         let status = try await manager.installMissing { seen.append($0) }
         let ytDlp = try #require(status.ytDlp)
@@ -157,14 +162,44 @@ final class FakeFetcher: ToolFetching, @unchecked Sendable {
     }
 
     /// Real static ffmpeg download, opt-in like the test above.
-    @Test(.enabled(if: ProcessInfo.processInfo.environment["DROPLOAD_NETWORK_TESTS"] == "1"))
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["DOWNLOADY_NETWORK_TESTS"] == "1"))
     func installsRealFFmpeg() async throws {
-        let container = FileManager.default.temporaryDirectory.appendingPathComponent("dropload-net-\(UUID().uuidString)")
+        let container = FileManager.default.temporaryDirectory.appendingPathComponent("downloady-net-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: container) }
         let manager = ToolManager(containerDirectory: container, log: { print($0) })
         try await manager.installFFmpeg { _ in }
         let result = await ToolProcess.run(manager.managedFFmpeg, ["-version"], timeout: 30)
         #expect(result?.status == 0)
         print("managed ffmpeg:", ToolVersion.ffmpeg(fromFirstLine: result?.output ?? "") ?? "?")
+    }
+}
+
+@MainActor
+@Suite struct ToolManagerSourceTests {
+    @Test func ffmpegIsResolvedWithoutYtDlp() async throws {
+        let container = FileManager.default.temporaryDirectory.appendingPathComponent("downloady-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: container) }
+        // `/bin/echo -version` prints "-version": a version line, with no yt-dlp anywhere.
+        let manager = ToolManager(
+            containerDirectory: container,
+            fetcher: FakeFetcher(files: [:]),
+            choices: { ToolChoices(ffmpegSource: .custom, ffmpegPath: "/bin/echo") },
+            log: { _ in }
+        )
+        #expect(await manager.resolve() == .missing)
+        let ffmpeg = try #require(await manager.resolveFFmpeg())
+        #expect(ffmpeg.source == .custom)
+        #expect(ffmpeg.version == "-version")
+        #expect(manager.missingManagedTools() == [.ytDlp])
+    }
+
+    @Test func aCustomYtDlpNeedsNoInstall() {
+        let manager = ToolManager(
+            containerDirectory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString),
+            fetcher: FakeFetcher(files: [:]),
+            choices: { ToolChoices(ytDlpSource: .custom, ffmpegSource: .custom) },
+            log: { _ in }
+        )
+        #expect(manager.missingManagedTools().isEmpty)
     }
 }

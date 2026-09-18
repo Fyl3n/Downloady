@@ -2,12 +2,12 @@
 
 **Depends on:** none · **Files:** `Tools/ToolManager.swift`,
 `Model/DownloadModel.swift` (`installTools`, tool status),
-`UI/DroploadSettingsView.swift` (tools card), `UI/DroploadWidget.swift`
+`UI/DownloadySettingsView.swift` (tools card), `UI/DownloadyWidget.swift`
 (install row).
 
 ## Goal
 
-The first time Dropload runs, it gets a working yt-dlp, and ffmpeg when
+The first time Downloady runs, it gets a working yt-dlp, and ffmpeg when
 needed, with no terminal. The Settings pane shows where each tool came from
 and can update yt-dlp.
 
