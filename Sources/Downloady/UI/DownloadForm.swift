@@ -160,6 +160,7 @@ struct FormatPickers: View {
                         Label(mode.title, systemImage: "text.quote")
                             .tag(mode)
                             .disabled(!model.isTranscriptModeAvailable(mode, isDefault: inSettings))
+                            .help(mode == .transcribe ? transcribeItemTip ?? "" : "")
                     }
                 }
                 .help(transcriptTip)
@@ -178,7 +179,18 @@ struct FormatPickers: View {
             .frame(width: 1, height: Self.height)
     }
 
+    /// Why Transcribe is greyed out, on the item itself.
+    private var transcribeItemTip: String? {
+        guard !model.canTranscribeLocally else { return nil }
+        if model.speechIsDenied { return Self.speechDeniedTip }
+        return model.transcriptionUnavailableReason
+    }
+
+    static let speechDeniedTip =
+        "Transcribe is off: speech recognition is not allowed for Droppy. Grant it in Downloady's settings."
+
     private var transcriptTip: String {
+        if model.speechIsDenied { return Self.speechDeniedTip }
         if inSettings {
             return "Every new download starts on this. Subtitles come from the site; a transcript is made on this Mac."
         }

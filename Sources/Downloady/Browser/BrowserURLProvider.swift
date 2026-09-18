@@ -78,10 +78,20 @@ public protocol BrowserURLProviding: AnyObject {
     func currentURL() async -> BrowserReadOutcome
 
     /// Starts calling `onChange` with a read whenever a supported browser
-    /// becomes frontmost. `stop()` tears it down.
-    func start(onChange: @escaping @MainActor (BrowserReadOutcome) -> Void)
+    /// becomes frontmost and `shouldRead` agrees. The browser is remembered
+    /// either way, so `currentURL()` knows which one to ask. `stop()` tears
+    /// it down.
+    func start(
+        shouldRead: @escaping @MainActor () -> Bool,
+        onChange: @escaping @MainActor (BrowserReadOutcome) -> Void
+    )
 
     func stop()
+
+    /// Remembers the frontmost application if it is a supported browser, so
+    /// the next `currentURL()` asks it. For a quick action fired from a
+    /// browser while auto-fill is off and nothing is being watched.
+    func rememberFrontmostApplication()
 }
 
 /// The real implementation.
@@ -97,6 +107,7 @@ public final class BrowserURLProvider: BrowserURLProviding {
     private let log: @MainActor (String) -> Void
     private var observer: NSObjectProtocol?
     private var onChange: (@MainActor (BrowserReadOutcome) -> Void)?
+    private var shouldRead: (@MainActor () -> Bool)?
     private var activationTask: Task<Void, Never>?
     private var inFlight: Task<BrowserReadOutcome, Never>?
     /// The most recent frontmost supported browser.
@@ -129,8 +140,12 @@ public final class BrowserURLProvider: BrowserURLProviding {
         return outcome
     }
 
-    public func start(onChange: @escaping @MainActor (BrowserReadOutcome) -> Void) {
+    public func start(
+        shouldRead: @escaping @MainActor () -> Bool,
+        onChange: @escaping @MainActor (BrowserReadOutcome) -> Void
+    ) {
         stop()
+        self.shouldRead = shouldRead
         self.onChange = onChange
         remember(NSWorkspace.shared.frontmostApplication)
         observer = NSWorkspace.shared.notificationCenter.addObserver(
@@ -152,8 +167,13 @@ public final class BrowserURLProvider: BrowserURLProviding {
         }
         observer = nil
         onChange = nil
+        shouldRead = nil
         activationTask?.cancel()
         activationTask = nil
+    }
+
+    public func rememberFrontmostApplication() {
+        remember(NSWorkspace.shared.frontmostApplication)
     }
 
     private func remember(_ app: NSRunningApplication?) {
@@ -170,6 +190,8 @@ public final class BrowserURLProvider: BrowserURLProviding {
         lastBrowser = browser
         // One read per activation; a newer activation replaces a pending one.
         activationTask?.cancel()
+        activationTask = nil
+        guard shouldRead?() == true else { return }
         activationTask = Task { [weak self] in
             guard let self else { return }
             let outcome = await self.currentURL()

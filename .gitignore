@@ -2,3 +2,8 @@
 .swiftpm/
 .DS_Store
 shots/
+
+# Per-machine agent wiring: absolute paths to the SDK checkout.
+# Regenerate with `droppykit agent --force`.
+.mcp.json
+.cursor/mcp.json

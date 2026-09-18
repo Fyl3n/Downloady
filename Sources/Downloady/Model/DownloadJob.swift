@@ -41,9 +41,6 @@ public struct DownloadJob: Identifiable, Equatable, Sendable {
     public var file: URL?
     /// The `.srt`, once the subtitles were written or the transcript ran.
     public var transcript: URL?
-    /// The paths yt-dlp announced, so a cancelled job takes its `.part`
-    /// files with it.
-    var destinations: [URL] = []
 
     public init(
         id: UUID = UUID(),

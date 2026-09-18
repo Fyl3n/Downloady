@@ -14,15 +14,45 @@ has landed.
    the progress.
 2. Paste a link, or just open the shelf while a video page is in front of you
    in Safari or a Chromium browser — Downloady fills the bar in on its own.
-   Turn that off in Settings if you would rather paste.
+   Turn that off in Settings if you would rather paste. By default it also
+   looks the page up when you switch to your browser, so the link is ready
+   before you open the shelf; **Check the tab in the background** in Settings
+   narrows that to when the widget is on your shelf, or to nothing at all.
 3. Choose the quality, the video container and the audio format. Anything the
    page cannot give you is greyed out. The choice applies to this download;
    the next one starts on the default you set in Settings.
-4. Press **Download**. The shelf stays open while it runs, the live activity
+4. Press **Download**. It runs in a queue you can leave: the live activity
    shows the progress when you look away, and a HUD says "Saved" when it is
-   done, with **Show in Finder**.
+   done, with **Show in Finder**. Cancelling a download takes its half-written
+   files with it.
 
 Files land in ~/Downloads unless you choose another folder in Settings.
+
+## Quick actions
+
+Downloady registers five global shortcuts, with no key bound by default. Bind
+the ones you want in Droppy's Settings, Shortcuts:
+
+- **Open Downloady**
+- **Download this video** and **Download audio from this video**: the page
+  in front of you in your browser
+- **Download the pasted video** and **Download audio from the pasted video**:
+  the link on the clipboard
+
+Each one opens Downloady on the notch, which shows the download starting, or
+why it could not.
+
+## Text beside the video
+
+The **Text** picker writes an `.srt` next to the media.
+
+- **Subtitles** are the site's own, written by yt-dlp and converted to SubRip.
+  Greyed out when the page has none.
+- **Transcribe** makes one on this Mac with macOS 26's speech models, after
+  the download, in the background. The audio never leaves the machine. It
+  needs macOS 26, ffmpeg, and macOS's permission to recognise speech, which
+  Downloady's settings ask for with **Grant**. Refuse it and Transcribe is
+  greyed out, with the reason on the picker.
 
 ## The tools Downloady uses
 
@@ -42,10 +72,16 @@ not match is discarded and nothing is written into place. Downloady checks
 GitHub for a newer yt-dlp when the Settings pane opens and offers **Update**,
 and leaves a yt-dlp from This Mac or a custom path alone.
 
+yt-dlp runs with `--ignore-config`, so a `yt-dlp` configuration file of your
+own cannot change what Downloady asks for or the output it reads back.
+
 Downloady asks for these capabilities and no others: `expanded-surface`,
-`shelf-read`, `shelf-write`, `hud`, `network-client`, `downloads` and
-`apple-events` (reading the front tab of a browser, which macOS also gates
-behind its own Automation prompt).
+`shelf-read`, `hud`, `network-client`, `downloads`, `apple-events` (reading
+the front tab of a browser, which macOS also gates behind its own Automation
+prompt), `speech-recognition` (transcribing on this Mac, which macOS gates
+behind its own prompt too), `global-shortcuts` (the quick actions) and
+`clipboard-read` (the link a "pasted video" quick action downloads, read only
+when you press it).
 
 ## Credits and licences
 
@@ -75,9 +111,3 @@ droppykit submit     # open the submission form, filled in from this checkout
 `AGENTS.md` is the brief for a coding agent, `docs/PLAN.md` the plan, and
 `docs/tickets/` the work. `swift test` covers the pure logic; the network
 tests only run with `DOWNLOADY_NETWORK_TESTS=1`.
-
-## Before submitting
-
-- `creator.url` and `source.repository` in `droplet.json` are still
-  placeholders: this checkout has no git remote. Point them at the real
-  repository, push it, then run `droppykit submit`.

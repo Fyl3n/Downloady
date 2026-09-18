@@ -33,7 +33,7 @@ import Testing
             folder: URL(fileURLWithPath: "/tmp/out", isDirectory: true),
             ffmpeg: URL(fileURLWithPath: "/opt/homebrew/bin/ffmpeg")
         )
-        #expect(Array(args.prefix(5)) == ["--no-playlist", "--newline", "--no-colors", "--ffmpeg-location", "/opt/homebrew/bin/ffmpeg"])
+        #expect(Array(args.prefix(6)) == ["--ignore-config", "--no-playlist", "--newline", "--no-colors", "--ffmpeg-location", "/opt/homebrew/bin/ffmpeg"])
         #expect(args.contains("-x"))
         #expect(args.last == url.absoluteString)
         let output = try? #require(args.firstIndex(of: "-o"))
@@ -44,7 +44,7 @@ import Testing
 
     @Test func fetchArgumentsWithoutFFmpeg() {
         let args = YtDlpCommand.fetchInfo(URL(string: "https://example.com")!, ffmpeg: nil)
-        #expect(args == ["--no-playlist", "--newline", "--no-colors", "-J", "--skip-download", "--", "https://example.com"])
+        #expect(args == ["--ignore-config", "--no-playlist", "--newline", "--no-colors", "-J", "--skip-download", "--", "https://example.com"])
     }
 
     @Test func classifiesLines() {
@@ -64,14 +64,33 @@ import Testing
         #expect(YtDlpCommand.event(forLine: "[download] Destination: a.mp4") == nil)
     }
 
-    @Test func partialFilesAreOnlyTheSidecars() {
-        let destination = URL(fileURLWithPath: "/tmp/Me at the zoo [id].f401.mp4")
-        let partials = YtDlpClient.partialFiles(for: destination)
-        #expect(partials.map(\.path) == [
-            "/tmp/Me at the zoo [id].f401.mp4.part",
-            "/tmp/Me at the zoo [id].f401.mp4.ytdl",
+    @Test func readsEveryFileADownloadWrites() {
+        func written(_ line: String) -> String? { YtDlpCommand.writtenFile(forLine: line)?.path }
+        #expect(written("[download] Destination: /tmp/a [id].f401.mp4") == "/tmp/a [id].f401.mp4")
+        #expect(written("[info] Writing video subtitles to: /tmp/a [id].en.vtt") == "/tmp/a [id].en.vtt")
+        #expect(written("[Merger] Merging formats into \"/tmp/a [id].mkv\"") == "/tmp/a [id].mkv")
+        #expect(written("[ExtractAudio] Destination: /tmp/a [id].mp3") == "/tmp/a [id].mp3")
+        #expect(written("[VideoRemuxer] Remuxing video from webm to mp4; Destination: /tmp/a [id].mp4") == "/tmp/a [id].mp4")
+        #expect(written("[VideoRemuxer] Not remuxing media file \"/tmp/a.mp4\"; already is in target format mp4") == nil)
+        #expect(written("[download] Destination: a.mp4") == nil)
+        #expect(written("/tmp/a [id].mp4") == nil)
+        #expect(written("Deleting original file /tmp/a.webm") == nil)
+    }
+
+    @Test func leftoversAreOnlyWhatWasAnnounced() {
+        let stream = URL(fileURLWithPath: "/tmp/a [id].f401.mp4")
+        let merged = URL(fileURLWithPath: "/tmp/a [id].mkv")
+        #expect(YtDlpCommand.leftovers(of: [stream, merged]).map(\.path) == [
+            "/tmp/a [id].f401.mp4",
+            "/tmp/a [id].f401.mp4.part",
+            "/tmp/a [id].f401.mp4.ytdl",
+            "/tmp/a [id].f401.temp.mp4",
+            "/tmp/a [id].mkv",
+            "/tmp/a [id].mkv.part",
+            "/tmp/a [id].mkv.ytdl",
+            "/tmp/a [id].temp.mkv",
         ])
-        #expect(!partials.contains(destination))
+        #expect(YtDlpCommand.leftovers(of: []).isEmpty)
     }
 
     @Test func picksTheErrorLine() {
@@ -87,6 +106,7 @@ import Testing
         #expect(args.firstIndex(of: "--ies").map { args[$0 + 1] } == "default,-generic")
         #expect(args.firstIndex(of: "--proxy").map { args[$0 + 1] } == "http://127.0.0.1:9")
         #expect(args.suffix(2) == ["--", "https://example.com"])
+        #expect(args.first == "--ignore-config")
     }
 
     @Test func readsTheProbe() {
@@ -204,13 +224,8 @@ struct YtDlpClientNetworkTests {
         _ = try? await task.value
         try await Task.sleep(for: .seconds(3))
         #expect(Self.runningYtDlp() == 0)
-        // What the model deletes when the user presses Cancel: the sidecars
-        // of the paths yt-dlp announced. Nothing else may be left behind.
-        let destinations = await seen.files
-        #expect(!destinations.isEmpty)
-        for file in destinations.flatMap(YtDlpClient.partialFiles(for:)) {
-            try? FileManager.default.removeItem(at: file)
-        }
+        // The client cleans up once yt-dlp has exited: nothing may be left.
+        #expect(await !seen.files.isEmpty)
         let leftovers = (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []
         #expect(leftovers.isEmpty, "left behind: \(leftovers)")
     }

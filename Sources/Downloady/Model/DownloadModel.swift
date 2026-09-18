@@ -7,6 +7,7 @@
 //  settings pane all observe the same instance.
 //
 
+import AppKit
 import Combine
 import DroppyKit
 import Foundation
@@ -18,6 +19,8 @@ public enum PreferenceKey {
     public static let options = "options"
     public static let downloadFolder = "downloadFolder"
     public static let autoFillFromBrowser = "autoFillFromBrowser"
+    /// `BackgroundTabCheck` raw value. Unset: `.always`.
+    public static let backgroundTabCheck = "backgroundTabCheck"
     /// `[bundle ID: allowed]`, what macOS last said about each browser.
     public static let browserPermissions = "browserPermissions"
     public static let customYtDlpPath = "customYtDlpPath"
@@ -26,6 +29,45 @@ public enum PreferenceKey {
     /// ffmpeg the Mac's when there is one.
     public static let ytDlpSource = "ytDlpSource"
     public static let ffmpegSource = "ffmpegSource"
+}
+
+/// When auto-fill reads the browser's tab while the shelf is closed, so the
+/// link is already looked up when the shelf opens. Opening the shelf reads
+/// the tab whatever this says.
+public enum BackgroundTabCheck: String, CaseIterable, Sendable {
+    /// Every time a supported browser comes to the front.
+    case always
+    /// Only while the Downloady widget is on one of the user's shelf layouts.
+    case whenWidgetOnShelf
+    /// Only when the shelf opens.
+    case never
+
+    public var title: String {
+        switch self {
+        case .always: "Always"
+        case .whenWidgetOnShelf: "Widget on shelf"
+        case .never: "Never"
+        }
+    }
+
+    public var systemImage: String {
+        switch self {
+        case .always: "arrow.triangle.2.circlepath"
+        case .whenWidgetOnShelf: "square.grid.2x2"
+        case .never: "pause.circle"
+        }
+    }
+
+    /// Whether a browser coming to the front is read, given whether the
+    /// widget is on a shelf layout and whether a URL bar is on screen.
+    public func readsOnActivation(widgetOnShelf: Bool, formVisible: Bool) -> Bool {
+        if formVisible { return true }
+        switch self {
+        case .always: return true
+        case .whenWidgetOnShelf: return widgetOnShelf
+        case .never: return false
+        }
+    }
 }
 
 @MainActor
@@ -150,6 +192,11 @@ public final class DownloadModel: ObservableObject {
     private var currentDownloadID: UUID?
     private var currentTranscriptID: UUID?
     private var infoTask: Task<Void, Never>?
+    /// The URL a quick action put in the bar, downloaded as soon as its
+    /// lookup ends.
+    private(set) var pendingDownload: String?
+    /// The front-tab read a quick action started.
+    private var quickActionTask: Task<Void, Never>?
     /// The metadata of the URL in the bar, kept while a download runs so
     /// cancelling returns to `.ready`.
     @Published public private(set) var info: MediaInfo?
@@ -168,10 +215,6 @@ public final class DownloadModel: ObservableObject {
 
     func start(host: DropletHost) {
         self.host = host
-        defaultOptions = host.preferences.value(forKey: PreferenceKey.options, default: DownloadOptions())
-        browserPermissions = host.preferences.value(forKey: PreferenceKey.browserPermissions, default: [String: Bool]())
-        resetOptionsToDefault()
-
         let logger = host.log
         let tools = ToolManager(
             containerDirectory: host.environment.containerDirectory,
@@ -183,6 +226,13 @@ public final class DownloadModel: ObservableObject {
         self.ytDlp = YtDlpClient(tools: { [weak self] in self?.toolStatus ?? .unknown }) { logger.info($0) }
         self.transcriber = SpeechTranscriptionService { logger.info($0) }
         self.browser = BrowserURLProvider { logger.info($0) }
+
+        // After the transcriber and the permission are known, so the shelf
+        // steps off a Transcribe default only when this Mac cannot transcribe.
+        refreshSpeechStatus()
+        defaultOptions = host.preferences.value(forKey: PreferenceKey.options, default: DownloadOptions())
+        browserPermissions = host.preferences.value(forKey: PreferenceKey.browserPermissions, default: [String: Bool]())
+        resetOptionsToDefault()
 
         reloadTools()
         updateBrowserWatching()
@@ -198,19 +248,19 @@ public final class DownloadModel: ObservableObject {
         transcriptTask = nil
         infoTask?.cancel()
         infoTask = nil
+        quickActionTask?.cancel()
+        quickActionTask = nil
+        pendingDownload = nil
         toolTask?.cancel()
         toolTask = nil
         installingTools = []
         updateCheckTask?.cancel()
         updateCheckTask = nil
         isUpdatingTools = false
+        // Each download the client stops removes its own half-written files
+        // once its process has exited.
         ytDlp?.cancelAll()
         transcriber?.cancelAll()
-        // Droppy is putting the droplet away: nothing can finish, so the
-        // half-written files go with it.
-        for job in jobs where job.isActive {
-            removePartialFiles(of: job)
-        }
         jobs = []
         browser?.stop()
         browserIsWatching = false
@@ -241,6 +291,7 @@ public final class DownloadModel: ObservableObject {
         urlWasTyped = !text.isEmpty
         autoFilledBrowser = nil
         beforeAutoFill = nil
+        pendingDownload = nil
         probeTask?.cancel()
         probeTask = nil
         infoTask?.cancel()
@@ -261,6 +312,7 @@ public final class DownloadModel: ObservableObject {
     /// browser now, so the URL is the one in front of the user.
     public func formDidAppear() {
         visibleForms += 1
+        refreshSpeechStatus()
         refreshFromBrowser()
     }
 
@@ -290,6 +342,92 @@ public final class DownloadModel: ObservableObject {
             self.browserReadTask = nil
             self.browserDidRead(outcome)
         }
+    }
+
+    // MARK: Quick actions
+
+    /// "Download this video": reads the front tab of the browser the shortcut
+    /// was pressed in and downloads it. Works with auto-fill off; it needs the
+    /// `apple-events` grant and the browser's Automation permission.
+    /// `audioOnly` keeps only the sound, for this download alone.
+    public func downloadFrontTab(audioOnly: Bool = false) {
+        guard let host, let browser else { return }
+        guard host.isGranted(.appleEvents) else {
+            showQuickActionProblem("Droppy does not let Downloady read your browser")
+            return
+        }
+        browser.rememberFrontmostApplication()
+        quickActionTask?.cancel()
+        quickActionTask = Task { [weak self] in
+            let outcome = await browser.currentURL()
+            guard let self, !Task.isCancelled else { return }
+            self.quickActionTask = nil
+            switch outcome {
+            case .url(let url, let source):
+                self.record(.allowed, for: source)
+                self.lastTabURL = url
+                self.downloadNow(url, audioOnly: audioOnly)
+            case .notAuthorized(let source):
+                self.record(.denied, for: source)
+                self.showQuickActionProblem("\(source.name) does not let Downloady read its tabs")
+            case .nothing:
+                self.showQuickActionProblem("No web page in front")
+            }
+        }
+    }
+
+    /// "Download the pasted video": downloads the link on the clipboard.
+    /// Needs the `clipboard-read` grant. `audioOnly` keeps only the sound,
+    /// for this download alone.
+    public func downloadPasted(audioOnly: Bool = false) {
+        guard let host else { return }
+        guard host.isGranted(.clipboardRead) else {
+            showQuickActionProblem("Droppy does not let Downloady read the clipboard")
+            return
+        }
+        guard let text = NSPasteboard.general.string(forType: .string),
+              let url = Self.webURL(from: text)
+        else {
+            showQuickActionProblem("The clipboard holds no link")
+            return
+        }
+        downloadNow(url, audioOnly: audioOnly)
+    }
+
+    /// Puts `url` in the bar as if the user had typed it, looks it up, and
+    /// downloads it as soon as the lookup ends. The bar then shows the job,
+    /// or the reason it could not start. `audioOnly` switches the form to
+    /// audio only; starting the download puts it back on the default.
+    func downloadNow(_ url: URL, audioOnly: Bool = false) {
+        quickActionTask?.cancel()
+        quickActionTask = nil
+        clearBar()
+        if audioOnly { setAudioOnly(true) }
+        urlText = url.absoluteString
+        // Typed, so neither a browser read nor auto-fill replaces it while the
+        // lookup runs, and the bar is not emptied when the takeover appears.
+        urlWasTyped = true
+        sessionIsFresh = false
+        guard toolStatus.isReady else { return }
+        pendingDownload = urlText
+        fetchInfo()
+    }
+
+    /// Starts the download a quick action asked for, once its lookup ended
+    /// well. A failed lookup leaves the error in the bar and starts nothing.
+    private func startPendingDownload(after outcome: Result<MediaInfo, Error>, for text: String) {
+        guard pendingDownload == text else { return }
+        pendingDownload = nil
+        guard case .success = outcome else { return }
+        startDownload()
+    }
+
+    private func showQuickActionProblem(_ message: String) {
+        host?.log.info("Quick action: \(message)")
+        clearBar()
+        // So the takeover opening does not treat the empty bar as a fresh look.
+        sessionIsFresh = false
+        phase = .failed(message)
     }
 
     /// What a read of the front tab does to the bar.
@@ -336,6 +474,7 @@ public final class DownloadModel: ObservableObject {
         infoTask?.cancel()
         infoTask = nil
         beforeAutoFill = nil
+        pendingDownload = nil
         urlText = ""
         urlWasTyped = false
         autoFilledBrowser = nil
@@ -423,7 +562,10 @@ public final class DownloadModel: ObservableObject {
         guard wanted != browserIsWatching else { return }
         browserIsWatching = wanted
         if wanted {
-            browser.start { [weak self] outcome in self?.browserDidRead(outcome) }
+            browser.start(
+                shouldRead: { [weak self] in self?.readsTabOnActivation ?? false },
+                onChange: { [weak self] outcome in self?.browserDidRead(outcome) }
+            )
             host.log.info("Browser auto-fill on")
         } else {
             browser.stop()
@@ -468,6 +610,7 @@ public final class DownloadModel: ObservableObject {
         }
         guard autoFilledBrowser != nil else {
             applyInfo(outcome)
+            startPendingDownload(after: outcome, for: text)
             return
         }
         switch outcome {
@@ -656,7 +799,8 @@ public final class DownloadModel: ObservableObject {
             transcriptTask = nil
             currentTranscriptID = nil
         }
-        removePartialFiles(of: job)
+        // A running download's files are removed by the client once yt-dlp
+        // has exited; a waiting one has written nothing.
         jobs.removeAll { $0.id == id }
         pump()
     }
@@ -713,8 +857,8 @@ public final class DownloadModel: ObservableObject {
                 for try await event in events {
                     guard let self, !Task.isCancelled else { return }
                     switch event {
-                    case .destination(let file):
-                        self.update(id) { $0.destinations.append(file) }
+                    case .destination:
+                        break
                     case .progress(let fraction, let speed, let eta):
                         self.update(id) { $0.state = .downloading(fraction: fraction, speed: speed, eta: eta) }
                     case .postProcessing:
@@ -737,7 +881,6 @@ public final class DownloadModel: ObservableObject {
     private func downloadDidEnd(_ id: UUID, file: URL?, failure: Error?) {
         guard let job = jobs[id: id] else { return }
         guard let file else {
-            removePartialFiles(of: job)
             if let failure, failure as? YtDlpError != .cancelled {
                 update(id) { $0.state = .failed(failure.localizedDescription) }
             } else {
@@ -745,10 +888,7 @@ public final class DownloadModel: ObservableObject {
             }
             return
         }
-        update(id) {
-            $0.destinations = []
-            $0.file = file
-        }
+        update(id) { $0.file = file }
         if job.options.transcript.writesSubtitles {
             update(id) { $0.transcript = Self.subtitleFile(beside: file) }
         }
@@ -772,29 +912,31 @@ public final class DownloadModel: ObservableObject {
         let duration = job.duration
         transcriptTask = Task { [weak self] in
             guard let self else { return }
-            guard await self.allowSpeechRecognition() else {
-                self.transcriptDidEnd(id, transcript: nil, failure: TranscriptionError.notAuthorized)
-                return
-            }
             var transcript: URL?
             var failure: Error?
-            do {
-                transcript = try await transcriber.transcribe(
-                    media: media,
-                    duration: duration,
-                    ffmpeg: ffmpeg
-                ) { [weak self] event in
-                    guard let self else { return }
-                    switch event {
-                    case .preparing:
-                        self.update(id) { $0.state = .preparingTranscript }
-                    case .progress(let fraction):
-                        self.update(id) { $0.state = .transcribing(fraction: fraction) }
+            if await self.allowSpeechRecognition() {
+                do {
+                    transcript = try await transcriber.transcribe(
+                        media: media,
+                        duration: duration,
+                        ffmpeg: ffmpeg
+                    ) { [weak self] event in
+                        guard let self else { return }
+                        switch event {
+                        case .preparing:
+                            self.update(id) { $0.state = .preparingTranscript }
+                        case .progress(let fraction):
+                            self.update(id) { $0.state = .transcribing(fraction: fraction) }
+                        }
                     }
+                } catch {
+                    failure = error
                 }
-            } catch {
-                failure = error
+            } else {
+                failure = TranscriptionError.notAuthorized
             }
+            // Every way out below frees the lane: returning early here once
+            // left the next transcript waiting forever.
             guard !Task.isCancelled else { return }
             self.transcriptTask = nil
             self.currentTranscriptID = nil
@@ -824,11 +966,16 @@ public final class DownloadModel: ObservableObject {
     /// Asks Droppy for speech recognition the first time a transcript runs.
     private func allowSpeechRecognition() async -> Bool {
         guard let host, host.isGranted(.speechRecognition) else { return false }
-        let status = host.permissions.status(for: .speechRecognition)
-        switch status {
-        case .granted: return true
-        case .notDetermined: return await host.permissions.request(.speechRecognition) == .granted
-        default: return false
+        refreshSpeechStatus()
+        switch speechStatus {
+        case .granted:
+            return true
+        case .notDetermined:
+            _ = await host.permissions.request(.speechRecognition)
+            refreshSpeechStatus()
+            return speechStatus == .granted
+        default:
+            return false
         }
     }
 
@@ -844,22 +991,6 @@ public final class DownloadModel: ObservableObject {
         done.removeLast(Self.historyLimit)
         let stale = Set(done.map(\.id))
         jobs.removeAll { stale.contains($0.id) }
-    }
-
-    /// Clears the `.part` files a stopped download left in the folder.
-    ///
-    /// Only the sidecars of the paths yt-dlp itself announced, never a path
-    /// Downloady guessed at, and never a finished stream: a cancelled download
-    /// should not leave a growing pile in the user's Downloads folder, and it
-    /// should not take anything else with it either.
-    private func removePartialFiles(of job: DownloadJob) {
-        let files = job.destinations.flatMap(YtDlpClient.partialFiles(for:))
-        guard !files.isEmpty else { return }
-        Task.detached(priority: .utility) {
-            for file in files {
-                try? FileManager.default.removeItem(at: file)
-            }
-        }
     }
 
     /// The `.srt` yt-dlp wrote next to the media, whatever language it chose.
@@ -1099,6 +1230,28 @@ public final class DownloadModel: ObservableObject {
         }
     }
 
+    /// When the tab is read while the shelf is closed.
+    public var backgroundTabCheck: BackgroundTabCheck {
+        get {
+            host?.preferences.value(forKey: PreferenceKey.backgroundTabCheck, as: String.self)
+                .flatMap(BackgroundTabCheck.init(rawValue:)) ?? .always
+        }
+        set {
+            host?.preferences.setValue(newValue.rawValue, forKey: PreferenceKey.backgroundTabCheck)
+            objectWillChange.send()
+        }
+    }
+
+    /// Asked by the browser provider each time a browser comes to the front.
+    private var readsTabOnActivation: Bool {
+        guard let host else { return false }
+        let state = host.installState.state
+        return backgroundTabCheck.readsOnActivation(
+            widgetOnShelf: state.isEnabled && state.activeWidgetIDs.contains(DownloadyDroplet.widgetID),
+            formVisible: visibleForms > 0
+        )
+    }
+
     /// Whether Droppy granted the `apple-events` capability.
     public var appleEventsGranted: Bool { host?.isGranted(.appleEvents) ?? false }
 
@@ -1252,10 +1405,23 @@ public final class DownloadModel: ObservableObject {
 
     // MARK: Transcripts
 
-    /// Whether this Mac can transcribe at all: macOS 26 or later, and Droppy
-    /// passing the speech capability through.
-    public var canTranscribeLocally: Bool {
+    /// Whether this Mac could transcribe, permission aside: macOS 26 or
+    /// later, and Droppy passing the speech capability through.
+    public var transcriptionIsPossible: Bool {
         (transcriber?.isSupported ?? false) && (host?.isGranted(.speechRecognition) ?? false)
+    }
+
+    /// Whether Transcribe can be picked: possible, and macOS has not refused
+    /// speech recognition. Not asked yet still counts: the first transcript
+    /// asks.
+    public var canTranscribeLocally: Bool {
+        transcriptionIsPossible && speechStatus != .denied && speechStatus != .unavailable
+    }
+
+    /// Whether the user refused speech recognition, which is what greys
+    /// Transcribe out on a Mac that could otherwise transcribe.
+    public var speechIsDenied: Bool {
+        transcriptionIsPossible && speechStatus == .denied
     }
 
     /// Why Settings says transcribing is off, or `nil` when it is available.
@@ -1266,30 +1432,47 @@ public final class DownloadModel: ObservableObject {
         if host?.isGranted(.speechRecognition) == false {
             return "Turn on speech recognition for Downloady in Droppy's Store settings."
         }
+        if speechStatus == .denied {
+            return "Speech recognition is not allowed for Droppy. Grant it to transcribe."
+        }
         if detectedFFmpeg == nil {
             return "Transcribing needs ffmpeg, which is set up under Tools."
         }
         return nil
     }
 
-    /// Speech recognition as Settings shows it.
-    public var speechStatus: DropletPermissionStatus {
-        guard let host, host.isGranted(.speechRecognition) else { return .unavailable }
-        return host.permissions.status(for: .speechRecognition)
-    }
-
-    /// Asks for speech recognition from the Settings button, so the prompt
-    /// never lands mid-download.
-    public func requestSpeechRecognition() {
-        guard let host, host.isGranted(.speechRecognition) else { return }
-        Task { [weak self] in
-            _ = await host.permissions.request(.speechRecognition)
-            self?.objectWillChange.send()
+    /// Speech recognition as macOS last reported it. Published, so the Text
+    /// picker greys Transcribe out as soon as it is refused.
+    @Published public private(set) var speechStatus: DropletPermissionStatus = .unavailable {
+        didSet {
+            guard speechStatus != oldValue else { return }
+            normalizeTranscript()
         }
     }
 
-    public func openSpeechSettings() {
-        host?.permissions.openSystemSettings(for: .speechRecognition)
+    /// Reads the permission again, when a form or Settings appears: the user
+    /// may have changed it in System Settings meanwhile.
+    public func refreshSpeechStatus() {
+        guard let host, host.isGranted(.speechRecognition) else {
+            speechStatus = .unavailable
+            return
+        }
+        speechStatus = host.permissions.status(for: .speechRecognition)
+    }
+
+    /// Settings' Grant button. macOS prompts only once: after a refusal the
+    /// request comes straight back denied, and System Settings is the one
+    /// place left to change it, so that is where the button then leads.
+    public func grantSpeechRecognition() {
+        guard let host, host.isGranted(.speechRecognition) else { return }
+        Task { [weak self] in
+            let status = await host.permissions.request(.speechRecognition)
+            guard let self else { return }
+            self.refreshSpeechStatus()
+            if status == .denied {
+                host.permissions.openSystemSettings(for: .speechRecognition)
+            }
+        }
     }
 
     /// Whether a text choice can be picked for the URL in the bar: there are

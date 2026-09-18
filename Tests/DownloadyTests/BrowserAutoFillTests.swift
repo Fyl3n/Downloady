@@ -132,3 +132,61 @@ import Testing
         #expect(cache.count == 2)
     }
 }
+
+@Suite struct BackgroundTabCheckTests {
+    @Test func alwaysReads() {
+        #expect(BackgroundTabCheck.always.readsOnActivation(widgetOnShelf: false, formVisible: false))
+    }
+
+    @Test func widgetOnShelfFollowsTheLayout() {
+        #expect(BackgroundTabCheck.whenWidgetOnShelf.readsOnActivation(widgetOnShelf: true, formVisible: false))
+        #expect(!BackgroundTabCheck.whenWidgetOnShelf.readsOnActivation(widgetOnShelf: false, formVisible: false))
+    }
+
+    @Test func neverWaitsForTheShelf() {
+        #expect(!BackgroundTabCheck.never.readsOnActivation(widgetOnShelf: true, formVisible: false))
+        // A URL bar on screen is not the background.
+        #expect(BackgroundTabCheck.never.readsOnActivation(widgetOnShelf: false, formVisible: true))
+    }
+}
+
+@MainActor
+@Suite struct QuickActionTests {
+    @Test func downloadNowPutsTheLinkInTheBarAsTyped() {
+        let model = DownloadModel()
+        model.downloadNow(URL(string: "https://vimeo.com/1")!)
+        #expect(model.urlText == "https://vimeo.com/1")
+        // Typed, so a browser read cannot replace it while it is looked up.
+        #expect(model.urlWasTyped)
+        #expect(model.autoFilledBrowser == nil)
+    }
+
+    @Test func withoutToolsNothingIsPending() {
+        let model = DownloadModel()
+        model.downloadNow(URL(string: "https://vimeo.com/1")!)
+        #expect(model.pendingDownload == nil)
+        #expect(model.jobs.isEmpty)
+    }
+
+    @Test func editingTheBarDropsThePendingDownload() {
+        let model = DownloadModel()
+        model.downloadNow(URL(string: "https://vimeo.com/1")!)
+        model.userEditedURL("https://vimeo.com/2")
+        #expect(model.pendingDownload == nil)
+    }
+}
+
+@MainActor
+@Suite struct AudioQuickActionTests {
+    @Test func audioOnlySwitchesTheFormToAudio() {
+        let model = DownloadModel()
+        model.downloadNow(URL(string: "https://vimeo.com/1")!, audioOnly: true)
+        #expect(model.isAudioOnly)
+    }
+
+    @Test func thePlainActionKeepsTheFormat() {
+        let model = DownloadModel()
+        model.downloadNow(URL(string: "https://vimeo.com/1")!)
+        #expect(!model.isAudioOnly)
+    }
+}

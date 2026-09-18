@@ -54,10 +54,12 @@ struct BrowserCard: View {
         DropletSettingsCard {
             DropletToggleRow(
                 title: "Fill in the link from your browser",
-                subtitle: "Reads the current tab of Safari or a Chromium browser when you open the shelf. "
+                subtitle: "Reads the current tab of Safari or a Chromium browser. "
                     + "Not supported on Firefox.",
                 isOn: Binding(get: { model.autoFillFromBrowser }, set: { model.autoFillFromBrowser = $0 })
             )
+            DropletSettingsDivider()
+            backgroundCheckRow
             DropletSettingsDivider()
             DropletControlRow(
                 title: "Currently allowed on",
@@ -71,6 +73,36 @@ struct BrowserCard: View {
             }
         }
         .onAppear { model.refreshBrowserPermissions() }
+    }
+
+    /// When the tab is read with the shelf closed. Only means something
+    /// while auto-fill is on.
+    private var backgroundCheckRow: some View {
+        let enabled = model.autoFillFromBrowser
+        let selected = model.backgroundTabCheck
+        return settingsUnifiedPickerRow(
+            title: "Check the tab's link in the background when...",
+            subtitle: "Looks the page up when you switch to your browser, so the link is ready "
+                + "when you open the shelf. 'Never' waits until the shelf opens.",
+            icon: "clock.arrow.circlepath",
+            options: BackgroundTabCheck.allCases,
+            accessibilityLabel: "Check the tab in the background",
+            groupPosition: .only,
+            isEnabled: { _ in enabled },
+            isSelected: { $0 == selected },
+            action: { model.backgroundTabCheck = $0 },
+            content: { option, isSelected, isEnabled in
+                settingsUnifiedSegmentLabel(
+                    icon: option.systemImage,
+                    title: option.title,
+                    isSelected: isSelected,
+                    isEnabled: isEnabled
+                )
+            }
+        )
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.5)
+        .help(enabled ? "" : "Turn on filling in the link from your browser first.")
     }
 
     static func names(_ browsers: [SupportedBrowser]) -> String {
@@ -226,10 +258,7 @@ struct TranscriptCard: View {
                 infoTip: model.transcriptionUnavailableReason
                     ?? "Runs after the download, in the background. The audio never leaves this Mac."
             ) {
-                HStack(spacing: DroppySpacing.xsm) {
-                    DropletValuePill(text: statusTitle)
-                    action
-                }
+                statusControl
             }
             if let reason = model.transcriptionUnavailableReason {
                 Label(reason, systemImage: "info.circle")
@@ -241,31 +270,32 @@ struct TranscriptCard: View {
             }
         }
         .animation(DroppyAnimation.state, value: model.transcriptionUnavailableReason)
+        .animation(DroppyAnimation.state, value: model.speechStatus)
+        .onAppear { model.refreshSpeechStatus() }
     }
 
-    private var statusTitle: String {
-        guard model.canTranscribeLocally else { return "Unavailable" }
-        switch model.speechStatus {
-        case .granted: return "Allowed"
-        case .notDetermined: return "Not asked yet"
-        case .denied: return "Denied"
-        case .unavailable: return "Unavailable"
-        @unknown default: return "Unknown"
-        }
-    }
-
+    /// "Allowed" once macOS said yes; until then, and after a refusal, the
+    /// Grant button in its place, which asks macOS again (or opens System
+    /// Settings, the only place a refusal can be undone).
     @ViewBuilder
-    private var action: some View {
-        if model.canTranscribeLocally {
+    private var statusControl: some View {
+        if !model.transcriptionIsPossible {
+            DropletValuePill(text: "Unavailable")
+        } else {
             switch model.speechStatus {
-            case .notDetermined:
-                Button("Allow") { model.requestSpeechRecognition() }
+            case .granted:
+                DropletValuePill(text: "Allowed")
+            case .notDetermined, .denied:
+                Button("Grant") { model.grantSpeechRecognition() }
                     .buttonStyle(DroppyAccentButtonStyle(size: .small))
-            case .denied:
-                Button("Open System Settings") { model.openSpeechSettings() }
-                    .buttonStyle(DroppyQuietButtonStyle(size: .small))
-            default:
-                EmptyView()
+                    .help(model.speechStatus == .denied
+                        ? "macOS refused speech recognition for Droppy. Grant asks again, in System Settings."
+                        : "Asks macOS to let Droppy recognise speech.")
+                    .transition(DroppyTransition.element)
+            case .unavailable:
+                DropletValuePill(text: "Unavailable")
+            @unknown default:
+                DropletValuePill(text: "Unknown")
             }
         }
     }

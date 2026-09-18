@@ -59,6 +59,7 @@ public final class DownloadyDroplet: NSObject, ObservableObject, Droplet {
         noticeObserver = model.notices.sink { [weak self] notice in
             self?.present(notice)
         }
+        registerQuickActions(host: host)
         host.log.info("Downloady activated")
     }
 
@@ -76,6 +77,10 @@ public final class DownloadyDroplet: NSObject, ObservableObject, Droplet {
             hudFile = nil
         }
         activitySubject.send(nil)
+        // The host unregisters the shortcuts on deactivate; this says so here.
+        for action in QuickAction.allCases {
+            host?.shortcuts.unregister(id: action.rawValue)
+        }
         model.stop()
         host = nil
     }
@@ -114,6 +119,51 @@ public final class DownloadyDroplet: NSObject, ObservableObject, Droplet {
 
     func openSettings() {
         _ = host?.workspace.openSettings()
+    }
+
+    // MARK: Quick actions
+
+    /// Global shortcuts the user binds in Droppy's Settings, Shortcuts page.
+    /// DroppyKit has no quick-action surface of its own, so these are how the
+    /// rest of Droppy reaches Downloady. None ships with a default binding.
+    enum QuickAction: String, CaseIterable {
+        case open = "open"
+        case downloadFrontTab = "download-front-tab"
+        case downloadPasted = "download-pasted"
+        case downloadFrontTabAudio = "download-front-tab-audio"
+        case downloadPastedAudio = "download-pasted-audio"
+
+        var title: String {
+            switch self {
+            case .open: "Open Downloady"
+            case .downloadFrontTab: "Download this video"
+            case .downloadPasted: "Download the pasted video"
+            case .downloadFrontTabAudio: "Download audio from this video"
+            case .downloadPastedAudio: "Download audio from the pasted video"
+            }
+        }
+    }
+
+    private func registerQuickActions(host: DropletHost) {
+        guard host.isGranted(.globalShortcuts) else { return }
+        for action in QuickAction.allCases {
+            host.shortcuts.register(id: action.rawValue, title: action.title, defaultShortcut: nil) { [weak self] in
+                self?.perform(action)
+            }
+        }
+    }
+
+    /// Opens the takeover, then starts the work: the takeover shows the link,
+    /// the job's progress, or why nothing started.
+    func perform(_ action: QuickAction) {
+        openDetail()
+        switch action {
+        case .open: break
+        case .downloadFrontTab: model.downloadFrontTab()
+        case .downloadPasted: model.downloadPasted()
+        case .downloadFrontTabAudio: model.downloadFrontTab(audioOnly: true)
+        case .downloadPastedAudio: model.downloadPasted(audioOnly: true)
+        }
     }
 
     /// A file landed: say so, unless the user is already looking at the shelf.

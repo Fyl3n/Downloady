@@ -2,8 +2,8 @@
   "id": "downloady",
   "name": "Downloady",
   "version": "1.0.0",
-  "summary": "Download the video in front of you, with text",
-  "description": "Paste a link, or let Downloady pick up the page open in Safari or a Chromium browser, choose the quality, the video container and the audio format, and download it with yt-dlp. It can write the site's subtitles beside the video, or transcribe it on this Mac on macOS 26. Downloads and transcripts run in the background, in a queue you can watch from the notch.",
+  "summary": "Download any video in front of you.",
+  "description": "Paste a link or let Downloady pick it up from your opened browser tab, and download medias from almost anywhere. You can choose the quality, the video container, the audio format, and even fetch the video's subtitles or transcribe it on this Mac. Based on yt-dlp.",
   "category": "Media",
   "kit": {
     "abi": 1,
@@ -17,7 +17,9 @@
     "network-client",
     "downloads",
     "apple-events",
-    "speech-recognition"
+    "speech-recognition",
+    "global-shortcuts",
+    "clipboard-read"
   ],
   "surfaces": [
     "shelf-widget",
@@ -30,11 +32,10 @@
   "creator": {
     "name": "Fylen",
     "kind": "community",
-    "url": "https://example.com",
     "avatar": "Creator.png"
   },
   "source": {
-    "repository": "https://github.com/you/downloady",
+    "repository": "https://github.com/Fyl3n/downloady",
     "license": "MIT"
   },
   "keywords": [

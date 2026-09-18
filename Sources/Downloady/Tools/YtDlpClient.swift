@@ -93,8 +93,20 @@ public enum YtDlpCommand {
     /// Lines yt-dlp prints when a post-processor starts.
     static let postProcessorPrefixes = ["[Merger]", "[ExtractAudio]", "[VideoRemuxer]"]
 
+    /// Where each post-processor says it writes, after these markers.
+    static let postProcessorOutputMarkers = [
+        "[Merger] Merging formats into ",
+        "[ExtractAudio] Destination: ",
+        "; Destination: ",
+    ]
+
+    /// The subtitle file yt-dlp is about to write.
+    static let subtitlePrefix = "[info] Writing video subtitles to: "
+
+    /// `--ignore-config`: a yt-dlp config file of the user's own (`--quiet`,
+    /// `-o`, `--print`…) would change the output this runner reads.
     static func common(ffmpeg: URL?) -> [String] {
-        var args = ["--no-playlist", "--newline", "--no-colors"]
+        var args = ["--ignore-config", "--no-playlist", "--newline", "--no-colors"]
         if let ffmpeg {
             args += ["--ffmpeg-location", ffmpeg.path]
         }
@@ -112,7 +124,7 @@ public enum YtDlpCommand {
     /// nothing leaves the Mac.
     public static func supportProbe(_ url: URL) -> [String] {
         [
-            "--no-playlist", "--no-colors", "--no-cache-dir",
+            "--ignore-config", "--no-playlist", "--no-colors", "--no-cache-dir",
             "--ies", "default,-generic",
             "--proxy", "http://127.0.0.1:9",
             "--socket-timeout", "2", "--retries", "0", "--extractor-retries", "0",
@@ -163,6 +175,51 @@ public enum YtDlpCommand {
             return .finished(URL(fileURLWithPath: trimmed))
         }
         return nil
+    }
+
+    /// The file a line says yt-dlp is about to write, for the cleanup of a
+    /// stopped download: a stream, a subtitle, or a post-processor's output.
+    /// `nil` for any other line, and for a path that is not absolute.
+    static func writtenFile(forLine line: String) -> URL? {
+        var rest: Substring?
+        if line.hasPrefix(destinationPrefix) {
+            rest = line.dropFirst(destinationPrefix.count)
+        } else if line.hasPrefix(subtitlePrefix) {
+            rest = line.dropFirst(subtitlePrefix.count)
+        } else if line.hasPrefix("[") {
+            for marker in postProcessorOutputMarkers {
+                if let range = line.range(of: marker) {
+                    rest = line[range.upperBound...]
+                    break
+                }
+            }
+        }
+        guard var path = rest?.trimmingCharacters(in: .whitespaces) else { return nil }
+        if path.count >= 2, path.hasPrefix("\""), path.hasSuffix("\"") {
+            path = String(path.dropFirst().dropLast())
+        }
+        return path.hasPrefix("/") ? URL(fileURLWithPath: path) : nil
+    }
+
+    /// What a download that stopped before the end leaves behind: every file
+    /// yt-dlp announced (its complete streams too, which only a merge that
+    /// never happened would have consumed), their `.part` and resume index,
+    /// and the `.temp` file ffmpeg writes a merge or remux into.
+    ///
+    /// Only paths yt-dlp announced in this run, never a guess: yt-dlp skips
+    /// a file already on disk without announcing it, so nothing the user had
+    /// before can be on this list.
+    public static func leftovers(of announced: [URL]) -> [URL] {
+        var files: [URL] = []
+        for file in announced {
+            files += [file, file.appendingPathExtension("part"), file.appendingPathExtension("ytdl")]
+            let ext = file.pathExtension
+            if !ext.isEmpty {
+                files.append(file.deletingPathExtension().appendingPathExtension("temp").appendingPathExtension(ext))
+            }
+        }
+        var seen = Set<URL>()
+        return files.filter { seen.insert($0).inserted }
     }
 
     /// The line worth showing from yt-dlp's stderr: the last `ERROR:` line,
@@ -360,7 +417,7 @@ public final class YtDlpClient: YtDlpRunning {
     }
 
     public func listExtractors() async -> String? {
-        guard let result = try? await runToEnd(["--list-extractors"]), result.0.status == 0 else { return nil }
+        guard let result = try? await runToEnd(["--ignore-config", "--list-extractors"]), result.0.status == 0 else { return nil }
         return String(decoding: result.1, as: UTF8.self)
     }
 
@@ -410,11 +467,13 @@ public final class YtDlpClient: YtDlpRunning {
 
         return AsyncThrowingStream { continuation in
             let lastFile = FileBox()
+            let announced = AnnouncedFiles()
             continuation.onTermination = { [weak self] termination in
                 if case .cancelled = termination { child.terminate() }
                 Task { @MainActor in self?.running[key] = nil }
             }
             child.start(collectStdout: false, onLine: { line in
+                if let file = YtDlpCommand.writtenFile(forLine: line) { announced.append(file) }
                 guard let event = YtDlpCommand.event(forLine: line) else { return }
                 if case .finished(let file) = event {
                     // Held back until the process exits cleanly.
@@ -423,6 +482,13 @@ public final class YtDlpClient: YtDlpRunning {
                     continuation.yield(event)
                 }
             }, completion: { result in
+                // The process has exited (ffmpeg with it), so nothing can
+                // write a file back after it is removed.
+                if case .success(let (exit, _)) = result, !child.wasTerminated, exit.status == 0 {
+                    // Finished: yt-dlp removed its own intermediates.
+                } else {
+                    Self.removeLeftovers(of: announced.files)
+                }
                 switch result {
                 case .failure(let error):
                     continuation.finish(throwing: error)
@@ -447,14 +513,11 @@ public final class YtDlpClient: YtDlpRunning {
         }
     }
 
-    /// The half-written files a cancelled download leaves beside `destination`.
-    ///
-    /// Only the two yt-dlp names for "not finished": a `.part` and its
-    /// resume index. The destination itself is never touched — by the time it
-    /// exists it is a complete stream, and guessing is how a cleanup deletes
-    /// something it did not write.
-    nonisolated public static func partialFiles(for destination: URL) -> [URL] {
-        ["part", "ytdl"].map { destination.appendingPathExtension($0) }
+    /// Deletes what a stopped or failed download left in the folder.
+    nonisolated static func removeLeftovers(of announced: [URL]) {
+        for file in YtDlpCommand.leftovers(of: announced) {
+            try? FileManager.default.removeItem(at: file)
+        }
     }
 
     public func cancelAll() {
@@ -470,6 +533,15 @@ public final class YtDlpClient: YtDlpRunning {
 
     private final class FileBox: @unchecked Sendable {
         var url: URL?
+    }
+
+    /// The files yt-dlp announced, appended from the pipe's reading thread.
+    private final class AnnouncedFiles: @unchecked Sendable {
+        private let lock = NSLock()
+        private var urls: [URL] = []
+
+        func append(_ url: URL) { lock.withLock { urls.append(url) } }
+        var files: [URL] { lock.withLock { urls } }
     }
 }
 
