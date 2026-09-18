@@ -18,8 +18,7 @@
     "downloads",
     "apple-events",
     "speech-recognition",
-    "global-shortcuts",
-    "clipboard-read"
+    "global-shortcuts"
   ],
   "surfaces": [
     "shelf-widget",
@@ -35,7 +34,7 @@
     "avatar": "Creator.png"
   },
   "source": {
-    "repository": "https://github.com/Fyl3n/downloady",
+    "repository": "https://github.com/Fyl3n/Downloady",
     "license": "MIT"
   },
   "keywords": [

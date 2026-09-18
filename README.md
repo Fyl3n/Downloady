@@ -79,9 +79,9 @@ Downloady asks for these capabilities and no others: `expanded-surface`,
 `shelf-read`, `hud`, `network-client`, `downloads`, `apple-events` (reading
 the front tab of a browser, which macOS also gates behind its own Automation
 prompt), `speech-recognition` (transcribing on this Mac, which macOS gates
-behind its own prompt too), `global-shortcuts` (the quick actions) and
-`clipboard-read` (the link a "pasted video" quick action downloads, read only
-when you press it).
+behind its own prompt too) and `global-shortcuts` (the quick actions). A
+"pasted video" quick action reads the link on the clipboard once, when you
+press it; Downloady never reads Droppy's clipboard history.
 
 ## Credits and licences
 

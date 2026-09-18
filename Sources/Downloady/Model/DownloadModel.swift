@@ -377,14 +377,12 @@ public final class DownloadModel: ObservableObject {
     }
 
     /// "Download the pasted video": downloads the link on the clipboard.
-    /// Needs the `clipboard-read` grant. `audioOnly` keeps only the sound,
-    /// for this download alone.
+    /// Reads the pasteboard once, when the shortcut is pressed, the way the
+    /// URL bar's paste button does. `clipboard-read` is Droppy's clipboard
+    /// history, which Downloady never touches. `audioOnly` keeps only the
+    /// sound, for this download alone.
     public func downloadPasted(audioOnly: Bool = false) {
-        guard let host else { return }
-        guard host.isGranted(.clipboardRead) else {
-            showQuickActionProblem("Droppy does not let Downloady read the clipboard")
-            return
-        }
+        guard host != nil else { return }
         guard let text = NSPasteboard.general.string(forType: .string),
               let url = Self.webURL(from: text)
         else {
