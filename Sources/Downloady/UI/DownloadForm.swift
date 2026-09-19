@@ -603,7 +603,7 @@ struct QueueButton: View {
             Image(systemName: "list.bullet")
                 .overlay(alignment: .bottomTrailing) {
                     if summary.isActive {
-                        QueueSpinner()
+                        QueueProgressArc(fraction: summary.fraction)
                             .frame(width: 9, height: 9)
                             .offset(x: 5, y: 2)
                             .transition(.opacity)
@@ -639,19 +639,21 @@ struct BareIconButtonStyle: ButtonStyle {
     }
 }
 
-/// A small ring with an arc turning on it while the queue works. It says
-/// "busy", not "how far": the queue itself has the numbers.
-struct QueueSpinner: View {
-    @State private var turning = false
+/// A small ring that fills with the leading job while the queue works.
+///
+/// It used to be an arc turning forever, which made SwiftUI redraw the notch
+/// window every frame on Droppy's main thread for the whole download, even
+/// behind a closed shelf. This one only redraws when progress is published.
+struct QueueProgressArc: View {
+    let fraction: Double
 
     var body: some View {
         Circle()
-            .trim(from: 0, to: 0.3)
+            .trim(from: 0, to: min(max(fraction, 0.1), 1))
             .stroke(AdaptiveColors.selectionBlueAuto, style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
             .background(Circle().stroke(AdaptiveColors.notchSurfaceCardFill, lineWidth: 1.5))
-            .rotationEffect(.degrees(turning ? 360 : 0))
-            .animation(.linear(duration: 1).repeatForever(autoreverses: false), value: turning)
-            .onAppear { turning = true }
+            .rotationEffect(.degrees(-90))
+            .animation(DroppyAnimation.state, value: fraction)
             .accessibilityHidden(true)
     }
 }

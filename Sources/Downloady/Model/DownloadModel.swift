@@ -888,7 +888,7 @@ public final class DownloadModel: ObservableObject {
                     case .destination:
                         break
                     case .progress(let fraction, let speed, let eta):
-                        self.update(id) { $0.state = .downloading(fraction: fraction, speed: speed, eta: eta) }
+                        self.updateProgress(id, to: .downloading(fraction: fraction, speed: speed, eta: eta))
                     case .postProcessing:
                         self.update(id) { $0.state = .postProcessing }
                     case .finished(let file):
@@ -907,6 +907,7 @@ public final class DownloadModel: ObservableObject {
     }
 
     private func downloadDidEnd(_ id: UUID, file: URL?, failure: Error?) {
+        progressPublishedAt[id] = nil
         guard let job = jobs[id: id] else { return }
         guard let file else {
             if let failure, failure as? YtDlpError != .cancelled {
@@ -954,7 +955,7 @@ public final class DownloadModel: ObservableObject {
                         case .preparing:
                             self.update(id) { $0.state = .preparingTranscript }
                         case .progress(let fraction):
-                            self.update(id) { $0.state = .transcribing(fraction: fraction) }
+                            self.updateProgress(id, to: .transcribing(fraction: fraction))
                         }
                     }
                 } catch {
@@ -974,6 +975,7 @@ public final class DownloadModel: ObservableObject {
     }
 
     private func transcriptDidEnd(_ id: UUID, transcript: URL?, failure: Error?) {
+        progressPublishedAt[id] = nil
         guard jobs[id: id] != nil else { return }
         if let transcript {
             update(id) {
@@ -1010,6 +1012,19 @@ public final class DownloadModel: ObservableObject {
     private func update(_ id: UUID, _ change: (inout DownloadJob) -> Void) {
         guard let index = jobs.firstIndex(where: { $0.id == id }) else { return }
         change(&jobs[index])
+    }
+
+    /// When each job's progress was last published, for `updateProgress`.
+    private var progressPublishedAt: [UUID: Date] = [:]
+
+    /// A progress tick, coalesced: see `DownloadJob.shouldPublish`.
+    private func updateProgress(_ id: UUID, to state: DownloadJob.State) {
+        guard let old = jobs[id: id]?.state else { return }
+        let now = Date()
+        let elapsed = progressPublishedAt[id].map { now.timeIntervalSince($0) } ?? .infinity
+        guard DownloadJob.shouldPublish(state, over: old, elapsed: elapsed) else { return }
+        progressPublishedAt[id] = now
+        update(id) { $0.state = state }
     }
 
     /// Keeps the queue short: the oldest finished rows go first.

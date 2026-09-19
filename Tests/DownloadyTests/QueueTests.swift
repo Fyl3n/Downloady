@@ -114,3 +114,27 @@ import Testing
         #expect(DownloadModel.subtitleFile(beside: media) == subtitles)
     }
 }
+
+@Suite struct ProgressThrottleTests {
+    private func downloading(_ fraction: Double, speed: String? = "1MiB/s") -> DownloadJob.State {
+        .downloading(fraction: fraction, speed: speed, eta: "00:10")
+    }
+
+    @Test func aTickInsideTheSamePercentWaits() {
+        #expect(!DownloadJob.shouldPublish(downloading(0.421), over: downloading(0.420), elapsed: 0.5))
+    }
+
+    @Test func aNewPercentPublishesOnceTheIntervalPassed() {
+        #expect(!DownloadJob.shouldPublish(downloading(0.43), over: downloading(0.42), elapsed: 0.05))
+        #expect(DownloadJob.shouldPublish(downloading(0.43), over: downloading(0.42), elapsed: 0.3))
+    }
+
+    @Test func theSpeedRefreshesEverySecond() {
+        #expect(DownloadJob.shouldPublish(downloading(0.42, speed: "2MiB/s"), over: downloading(0.42), elapsed: 1.2))
+    }
+
+    @Test func aNewStageAlwaysPublishes() {
+        #expect(DownloadJob.shouldPublish(.postProcessing, over: downloading(0.99), elapsed: 0))
+        #expect(DownloadJob.shouldPublish(.transcribing(fraction: 0.01), over: .preparingTranscript, elapsed: 0))
+    }
+}

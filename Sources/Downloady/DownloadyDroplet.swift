@@ -53,9 +53,12 @@ public final class DownloadyDroplet: NSObject, ObservableObject, Droplet {
         self.host = host
         model.start(host: host)
         // The live activity is a pure function of the queue.
-        queueObserver = model.$jobs.sink { [weak self] jobs in
-            self?.publishActivity(for: QueueSummary(jobs: jobs))
-        }
+        // Only the stage reaches the host: the percentage ticks inside the
+        // wings, which observe the model, and never re-publishes the state.
+        queueObserver = model.$jobs
+            .map { Self.activityState(for: QueueSummary(jobs: $0)) }
+            .removeDuplicates()
+            .sink { [weak self] state in self?.activitySubject.send(state) }
         noticeObserver = model.notices.sink { [weak self] notice in
             self?.present(notice)
         }
@@ -350,22 +353,20 @@ extension DownloadyDroplet: LiveActivityProviding {
     /// Asks for the compact seat while any job is running — a download, or a
     /// transcript running behind it — and stands down the moment the queue
     /// goes quiet: the shelf is where the finished files are.
-    private func publishActivity(for summary: QueueSummary) {
-        guard summary.isActive else {
-            activitySubject.send(nil)
-            return
-        }
-        activitySubject.send(
-            LiveActivityState(
-                // Below Droppy's own timers and calls: a download is a
-                // status, not something the user is waiting on the second.
-                priority: 150,
-                accessibilityTitle: summary.leading?.isTranscribing == true ? "Transcribing" : "Downloading",
-                isInteractive: false,
-                joinsPersistentActivitySet: false,
-                compactPresentation: nil,
-                expandedWidgetID: Self.widgetID.rawValue
-            )
+    private static func activityState(for summary: QueueSummary) -> LiveActivityState? {
+        guard summary.isActive else { return nil }
+        return LiveActivityState(
+            // Below Droppy's own timers and calls: a download is a
+            // status, not something the user is waiting on the second.
+            priority: 150,
+            accessibilityTitle: summary.leading?.isTranscribing == true ? "Transcribing" : "Downloading",
+            isInteractive: false,
+            // A download the user started is worth keeping in view until it
+            // lands. Left false, the host only reveals the row while the
+            // pointer is over the notch.
+            joinsPersistentActivitySet: true,
+            compactPresentation: nil,
+            expandedWidgetID: widgetID.rawValue
         )
     }
 

@@ -68,12 +68,18 @@ struct DownloadActivityValue: View {
             .lineLimit(1)
             .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
             .padding(.leading, DroppySpacing.sm)
-            .id(label)
+            // Swapped with a transition only when the stage changes ("42%"
+            // to "Finishing"); a percentage tick is a plain redraw, or the
+            // transition replays in the notch on every tick.
+            .id(stage)
             .transition(DroppyTransition.compactContent)
-            .animation(DroppyAnimation.state, value: label)
+            .animation(DroppyAnimation.state, value: stage)
     }
 
     private var label: String { model.summary.activityLabel }
+
+    /// The label without its digits: what changes when the stage does.
+    private var stage: String { label.filter { !$0.isNumber } }
 }
 
 /// The card the completion HUD grows into: what landed, and where to see it.

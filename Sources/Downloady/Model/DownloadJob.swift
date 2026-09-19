@@ -133,6 +133,32 @@ public struct DownloadJob: Identifiable, Equatable, Sendable {
         }
     }
 
+    /// Whether a progress tick is worth publishing over the state on screen.
+    ///
+    /// yt-dlp prints a progress line for every block it writes, dozens a
+    /// second on a fast link, and every published change redraws the widget,
+    /// the takeover and the notch row on Droppy's main thread. A tick is
+    /// published when the stage changes, when the whole percentage moves (at
+    /// most `minimumInterval` apart), or once `refreshInterval` has passed so
+    /// the speed and time left stay fresh.
+    public static func shouldPublish(
+        _ new: State,
+        over old: State,
+        elapsed: TimeInterval,
+        minimumInterval: TimeInterval = 0.25,
+        refreshInterval: TimeInterval = 1
+    ) -> Bool {
+        let percents: (Double, Double)
+        switch (old, new) {
+        case let (.downloading(a, _, _), .downloading(b, _, _)): percents = (a, b)
+        case let (.transcribing(a), .transcribing(b)): percents = (a, b)
+        default: return old != new
+        }
+        if elapsed >= refreshInterval { return old != new }
+        let wholePercent = { (fraction: Double) in Int((fraction * 100).rounded(.down)) }
+        return elapsed >= minimumInterval && wholePercent(percents.0) != wholePercent(percents.1)
+    }
+
     public static func progressDetail(fraction: Double, speed: String?, eta: String?) -> String {
         var parts = [fraction.formatted(.percent.precision(.fractionLength(0)))]
         if let speed { parts.append(speed) }
