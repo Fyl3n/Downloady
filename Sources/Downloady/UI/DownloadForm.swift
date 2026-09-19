@@ -371,7 +371,9 @@ struct MediaCard: View {
 }
 
 /// The card's preview: the fetched thumbnail, falling back to the page's
-/// favicon, falling back to a glyph.
+/// favicon, falling back to a glyph. The images come from the model, which
+/// keeps those of the last few lookups, so a card shown again is complete at
+/// once.
 struct MediaPreview: View {
     @ObservedObject var model: DownloadModel
 
@@ -382,15 +384,13 @@ struct MediaPreview: View {
                 ProgressView()
                     .controlSize(.small)
             } else if let thumbnail = Self.httpsURL(model.info?.thumbnail) {
-                AsyncImage(url: thumbnail) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image.resizable().aspectRatio(contentMode: .fill)
-                    case .failure:
-                        favicon
-                    default:
-                        glyph
-                    }
+                switch model.previewImage(at: thumbnail) {
+                case .image(let image):
+                    Image(nsImage: image).resizable().aspectRatio(contentMode: .fill)
+                case .failed:
+                    favicon
+                case nil:
+                    glyph.task(id: thumbnail) { model.loadPreviewImage(at: thumbnail) }
                 }
             } else {
                 favicon
@@ -401,13 +401,11 @@ struct MediaPreview: View {
     @ViewBuilder
     private var favicon: some View {
         if model.info != nil, let url = Self.faviconURL(page: model.info?.webpageURL ?? model.urlText) {
-            AsyncImage(url: url) { phase in
-                if case .success(let image) = phase {
-                    image.resizable().interpolation(.high).aspectRatio(contentMode: .fit)
-                        .frame(width: 18, height: 18)
-                } else {
-                    glyph
-                }
+            if case .image(let image) = model.previewImage(at: url) {
+                Image(nsImage: image).resizable().interpolation(.high).aspectRatio(contentMode: .fit)
+                    .frame(width: 18, height: 18)
+            } else {
+                glyph.task(id: url) { model.loadPreviewImage(at: url) }
             }
         } else {
             glyph

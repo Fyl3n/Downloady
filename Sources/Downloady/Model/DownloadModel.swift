@@ -32,10 +32,11 @@ public enum PreferenceKey {
 }
 
 /// When auto-fill reads the browser's tab while the shelf is closed, so the
-/// link is already looked up when the shelf opens. Opening the shelf reads
-/// the tab whatever this says.
+/// link is already looked up when the shelf opens. The tab is read when a
+/// browser comes to the front and polled while it stays there. Opening the
+/// shelf reads the tab whatever this says.
 public enum BackgroundTabCheck: String, CaseIterable, Sendable {
-    /// Every time a supported browser comes to the front.
+    /// Whenever a supported browser is in front.
     case always
     /// Only while the Downloady widget is on one of the user's shelf layouts.
     case whenWidgetOnShelf
@@ -58,8 +59,9 @@ public enum BackgroundTabCheck: String, CaseIterable, Sendable {
         }
     }
 
-    /// Whether a browser coming to the front is read, given whether the
-    /// widget is on a shelf layout and whether a URL bar is on screen.
+    /// Whether the browser in front is read, given whether the widget is on a
+    /// shelf layout and whether a URL bar is on screen (the shelf is open, not
+    /// merely the widget mounted behind a closed one).
     public func readsOnActivation(widgetOnShelf: Bool, formVisible: Bool) -> Bool {
         if formVisible { return true }
         switch self {
@@ -177,6 +179,15 @@ public final class DownloadModel: ObservableObject {
     private var support = VerdictCache(capacity: 50)
     /// The probe of the URL auto-fill is about to put in the bar.
     private var probeTask: Task<Void, Never>?
+    /// The URL `probeTask` is probing, so a poll of the same tab does not
+    /// restart it.
+    private var probingKey: String?
+    /// The last few lookups that succeeded, by the text in the bar, so going
+    /// back to a recent tab shows its card at once, without yt-dlp.
+    private var recentLookups = RecentCache<MediaInfo>(capacity: 3)
+    /// Thumbnails and favicons of those lookups, by image URL.
+    private var images = RecentCache<PreviewImage>(capacity: 6)
+    private var imageTasks: [String: Task<Void, Never>] = [:]
     /// The front tab's URL at the last read, `nil` for no web page.
     private var lastTabURL: URL?
     /// How many URL bars are on screen (the widget, the takeover).
@@ -268,6 +279,11 @@ public final class DownloadModel: ObservableObject {
         browserReadTask = nil
         probeTask?.cancel()
         probeTask = nil
+        probingKey = nil
+        imageTasks.values.forEach { $0.cancel() }
+        imageTasks = [:]
+        recentLookups = RecentCache(capacity: 3)
+        images = RecentCache(capacity: 6)
         supportedSitesTask?.cancel()
         supportedSitesTask = nil
         shelfObserver?.cancel()
@@ -491,19 +507,24 @@ public final class DownloadModel: ObservableObject {
             toolsReady: toolStatus.isReady,
             verdict: verdicts[url.absoluteString]
         )
+        let key = url.absoluteString
+        // A poll of the tab being probed leaves the probe running.
+        if decision == .fill, probeTask != nil, probingKey == key { return }
         probeTask?.cancel()
         probeTask = nil
+        probingKey = nil
         guard decision == .fill else { return }
-        let key = url.absoluteString
         if let known = support[key] {
             if known { fill(url, from: source) }
             return
         }
         guard let ytDlp else { return }
+        probingKey = key
         probeTask = Task { [weak self] in
             let supported = await ytDlp.isSupported(url)
             guard let self, !Task.isCancelled else { return }
             self.probeTask = nil
+            self.probingKey = nil
             self.support[key] = supported
             // The user may have typed while the probe ran.
             guard supported, !self.urlWasTyped else { return }
@@ -583,7 +604,13 @@ public final class DownloadModel: ObservableObject {
         guard let url = Self.webURL(from: urlText) else { return }
         guard let ytDlp, toolStatus.isReady else { return }
         infoTask?.cancel()
+        infoTask = nil
         let requested = urlText
+        if let known = recentLookups[requested] {
+            recentLookups[requested] = known
+            finishLookup(.success(known), for: requested)
+            return
+        }
         phase = .fetchingInfo
         infoTask = Task { [weak self] in
             let outcome: Result<MediaInfo, Error>
@@ -602,7 +629,10 @@ public final class DownloadModel: ObservableObject {
     /// puts the bar back the way it was without a warning.
     func finishLookup(_ outcome: Result<MediaInfo, Error>, for text: String) {
         switch outcome {
-        case .success: verdicts[text] = true
+        case .success(let fetched):
+            verdicts[text] = true
+            recentLookups[text] = fetched
+            loadPreviewImages(for: fetched, page: text)
         case .failure(YtDlpError.unsupportedURL): verdicts[text] = false
         default: break
         }
@@ -1240,14 +1270,49 @@ public final class DownloadModel: ObservableObject {
         }
     }
 
-    /// Asked by the browser provider each time a browser comes to the front.
+    /// Asked by the browser provider before each read of the browser in front.
     private var readsTabOnActivation: Bool {
         guard let host else { return false }
         let state = host.installState.state
         return backgroundTabCheck.readsOnActivation(
             widgetOnShelf: state.isEnabled && state.activeWidgetIDs.contains(DownloadyDroplet.widgetID),
-            formVisible: visibleForms > 0
+            formVisible: visibleForms > 0 && host.shelf.isExpanded
         )
+    }
+
+    // MARK: Preview images
+
+    /// The thumbnail or favicon at `url`: `nil` while it has not loaded yet.
+    public func previewImage(at url: URL) -> PreviewImage? {
+        images[url.absoluteString]
+    }
+
+    /// Loads the image at `url` unless it is known or on its way. The card
+    /// asks when it shows a URL whose image is not in `images`.
+    public func loadPreviewImage(at url: URL) {
+        let key = url.absoluteString
+        guard images[key] == nil, imageTasks[key] == nil, host?.isGranted(.networkClient) == true else { return }
+        imageTasks[key] = Task { [weak self] in
+            let image: NSImage?
+            do {
+                let (data, response) = try await URLSession.shared.data(from: url)
+                let status = (response as? HTTPURLResponse)?.statusCode ?? 200
+                image = (200..<300).contains(status) ? NSImage(data: data) : nil
+            } catch {
+                image = nil
+            }
+            guard let self, !Task.isCancelled else { return }
+            self.imageTasks[key] = nil
+            self.objectWillChange.send()
+            self.images[key] = image.map(PreviewImage.image) ?? .failed
+        }
+    }
+
+    /// Fetches a lookup's thumbnail and favicon as soon as it ends, so a card
+    /// looked up in the background is complete when the shelf opens.
+    private func loadPreviewImages(for info: MediaInfo, page: String) {
+        if let thumbnail = MediaPreview.httpsURL(info.thumbnail) { loadPreviewImage(at: thumbnail) }
+        if let favicon = MediaPreview.faviconURL(page: info.webpageURL ?? page) { loadPreviewImage(at: favicon) }
     }
 
     /// Whether Droppy granted the `apple-events` capability.
@@ -1515,17 +1580,26 @@ struct AutoFillSnapshot {
     let browser: SupportedBrowser?
 }
 
+/// A thumbnail or favicon, or the knowledge that it could not be loaded.
+public enum PreviewImage {
+    case image(NSImage)
+    case failed
+}
+
 /// A small most-recently-set map from URL to "yt-dlp can handle it".
-struct VerdictCache {
+typealias VerdictCache = RecentCache<Bool>
+
+/// A small map that keeps the `capacity` most recently set keys.
+struct RecentCache<Value> {
     let capacity: Int
-    private var values: [String: Bool] = [:]
+    private var values: [String: Value] = [:]
     private var order: [String] = []
 
     init(capacity: Int) { self.capacity = capacity }
 
     var count: Int { values.count }
 
-    subscript(key: String) -> Bool? {
+    subscript(key: String) -> Value? {
         get { values[key] }
         set {
             order.removeAll { $0 == key }

@@ -82,8 +82,8 @@ struct BrowserCard: View {
         let selected = model.backgroundTabCheck
         return settingsUnifiedPickerRow(
             title: "Check the tab's link in the background when...",
-            subtitle: "Looks the page up when you switch to your browser, so the link is ready "
-                + "when you open the shelf. 'Never' waits until the shelf opens.",
+            subtitle: "Looks up the page you're on while your browser is in front, so the link is "
+                + "ready when you open the shelf. 'Never' waits until the shelf opens.",
             icon: "clock.arrow.circlepath",
             options: BackgroundTabCheck.allCases,
             accessibilityLabel: "Check the tab in the background",

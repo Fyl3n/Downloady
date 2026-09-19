@@ -190,3 +190,28 @@ import Testing
         #expect(!model.isAudioOnly)
     }
 }
+
+@Suite struct TabPollTests {
+    let safari = SupportedBrowser.all[0]
+    let video = URL(string: "https://www.youtube.com/watch?v=abc")!
+    let other = URL(string: "https://www.youtube.com/watch?v=def")!
+
+    @Test func reportsOnlyATabThatHeldStill() {
+        #expect(!BrowserURLProvider.isSettled(.url(video, safari), after: nil))
+        #expect(!BrowserURLProvider.isSettled(.url(video, safari), after: .url(other, safari)))
+        #expect(BrowserURLProvider.isSettled(.url(video, safari), after: .url(video, safari)))
+        #expect(BrowserURLProvider.isSettled(.nothing, after: .nothing))
+    }
+}
+
+@Suite struct RecentLookupsTests {
+    @Test func keepsTheLastThreeLookups() {
+        var cache = RecentCache<MediaInfo>(capacity: 3)
+        for index in 0..<4 {
+            cache["u\(index)"] = MediaInfo(id: "\(index)", title: "Video \(index)", extractorKey: "Youtube", formats: nil)
+        }
+        #expect(cache["u0"] == nil)
+        #expect(cache["u3"]?.title == "Video 3")
+        #expect(cache.count == 3)
+    }
+}

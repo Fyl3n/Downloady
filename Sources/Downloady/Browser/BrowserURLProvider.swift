@@ -78,7 +78,9 @@ public protocol BrowserURLProviding: AnyObject {
     func currentURL() async -> BrowserReadOutcome
 
     /// Starts calling `onChange` with a read whenever a supported browser
-    /// becomes frontmost and `shouldRead` agrees. The browser is remembered
+    /// becomes frontmost and `shouldRead` agrees, then again every
+    /// `pollInterval` while it stays in front and its tab holds still, so a
+    /// tab switched inside the browser is seen too. The browser is remembered
     /// either way, so `currentURL()` knows which one to ask. `stop()` tears
     /// it down.
     func start(
@@ -101,7 +103,9 @@ public protocol BrowserURLProviding: AnyObject {
 /// ignored), and reads its front tab with `NSAppleScript` on a private serial
 /// queue, never on the main actor. A browser that is no longer running is
 /// never asked, so a read cannot launch it. Reads are coalesced: while one is
-/// running, callers share it, and each activation starts at most one.
+/// running, callers share it. Each activation reads once, then polls while
+/// the browser stays in front: a poll is reported only once two reads in a
+/// row agree, so flicking through tabs reports nothing until one sticks.
 @MainActor
 public final class BrowserURLProvider: BrowserURLProviding {
     private let log: @MainActor (String) -> Void
@@ -109,6 +113,8 @@ public final class BrowserURLProvider: BrowserURLProviding {
     private var onChange: (@MainActor (BrowserReadOutcome) -> Void)?
     private var shouldRead: (@MainActor () -> Bool)?
     private var activationTask: Task<Void, Never>?
+    /// How often the front tab is read while a browser stays in front.
+    static let pollInterval: Duration = .seconds(2)
     private var inFlight: Task<BrowserReadOutcome, Never>?
     /// The most recent frontmost supported browser.
     public private(set) var lastBrowser: SupportedBrowser?
@@ -148,6 +154,9 @@ public final class BrowserURLProvider: BrowserURLProviding {
         self.shouldRead = shouldRead
         self.onChange = onChange
         remember(NSWorkspace.shared.frontmostApplication)
+        if let browser = SupportedBrowser.matching(bundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier) {
+            watch(browser, readingNow: false)
+        }
         observer = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil,
@@ -183,21 +192,52 @@ public final class BrowserURLProvider: BrowserURLProviding {
     }
 
     private func applicationDidActivate(bundleID: String?) {
-        // Droppy itself (or anything that is not a browser) keeps the last one.
-        guard bundleID != Bundle.main.bundleIdentifier,
-              let browser = SupportedBrowser.matching(bundleID: bundleID)
-        else { return }
-        lastBrowser = browser
-        // One read per activation; a newer activation replaces a pending one.
-        activationTask?.cancel()
-        activationTask = nil
-        guard shouldRead?() == true else { return }
-        activationTask = Task { [weak self] in
-            guard let self else { return }
-            let outcome = await self.currentURL()
-            guard !Task.isCancelled else { return }
-            self.onChange?(outcome)
+        // Droppy itself keeps the last browser, and its poll, which stops by
+        // itself once the browser is no longer in front.
+        guard bundleID != Bundle.main.bundleIdentifier else { return }
+        guard let browser = SupportedBrowser.matching(bundleID: bundleID) else {
+            activationTask?.cancel()
+            activationTask = nil
+            return
         }
+        lastBrowser = browser
+        watch(browser, readingNow: true)
+    }
+
+    /// Reads `browser` now (when `readingNow`), then every `pollInterval`
+    /// while it is in front. `shouldRead` is asked before every read, so a
+    /// setting changed meanwhile applies at the next one. A newer activation
+    /// replaces the watch.
+    private func watch(_ browser: SupportedBrowser, readingNow: Bool) {
+        activationTask?.cancel()
+        activationTask = Task { [weak self] in
+            var previous: BrowserReadOutcome?
+            if readingNow, self?.shouldRead?() == true, let outcome = await self?.currentURL() {
+                guard !Task.isCancelled else { return }
+                self?.onChange?(outcome)
+                previous = outcome
+            }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: Self.pollInterval)
+                guard !Task.isCancelled,
+                      NSWorkspace.shared.frontmostApplication?.bundleIdentifier == browser.bundleID
+                else { return }
+                guard let self, self.shouldRead?() == true else {
+                    previous = nil
+                    continue
+                }
+                let outcome = await self.currentURL()
+                guard !Task.isCancelled else { return }
+                if Self.isSettled(outcome, after: previous) { self.onChange?(outcome) }
+                previous = outcome
+            }
+        }
+    }
+
+    /// Whether a poll is worth reporting: the same as the read before it, so
+    /// the tab has held still for a whole interval.
+    nonisolated static func isSettled(_ outcome: BrowserReadOutcome, after previous: BrowserReadOutcome?) -> Bool {
+        outcome == previous
     }
 
     // MARK: AppleScript
@@ -208,11 +248,17 @@ public final class BrowserURLProvider: BrowserURLProviding {
         case error(Int)
     }
 
+    /// Scripts compiled on `queue`, one per browser, so a poll does not
+    /// compile its script again. Only touched on `queue`.
+    nonisolated(unsafe) private static var compiled: [String: NSAppleScript] = [:]
+
     nonisolated private static func runScript(_ source: String) async -> ScriptResult {
         await withCheckedContinuation { continuation in
             queue.async {
                 var errorInfo: NSDictionary?
-                let descriptor = NSAppleScript(source: source)?.executeAndReturnError(&errorInfo)
+                let script = compiled[source] ?? NSAppleScript(source: source)
+                compiled[source] = script
+                let descriptor = script?.executeAndReturnError(&errorInfo)
                 if let errorInfo {
                     let number = (errorInfo[NSAppleScript.errorNumber] as? NSNumber)?.intValue ?? 0
                     continuation.resume(returning: .error(number))
