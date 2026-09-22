@@ -186,29 +186,32 @@ public struct QueueSummary: Equatable, Sendable {
 
     public var fraction: Double { leading?.fraction ?? 0 }
 
-    /// The trailing wing of the live activity: the percentage, a word for the
-    /// stage that has none, and the count when more than one job is left.
+    /// The trailing wing of the live activity: a percentage, or "Text" while
+    /// a transcript has none yet.
+    ///
+    /// A notch wing leaves about 37pt for this label at 12pt: "100 %" is
+    /// 35pt, while "Finishing" (51pt), "Queued" (45pt) and a job count
+    /// ("62 % · 3") are cut short. So the stages without a number show the
+    /// one they amount to, and the ring's glyph says which stage it is. The
+    /// queue has the count.
     public var activityLabel: String {
         guard let leading else { return "" }
-        let head: String
+        let percent = { (fraction: Double) in fraction.formatted(.percent.precision(.fractionLength(0))) }
         switch leading.state {
         case .downloading(let fraction, _, _):
-            head = fraction.formatted(.percent.precision(.fractionLength(0)))
+            return percent(fraction)
         case .postProcessing:
-            head = "Finishing"
+            // The bytes are all here; ffmpeg is merging them.
+            return percent(1)
         case .preparingTranscript, .waitingForTranscript:
-            head = "Text"
+            return "Text"
         case .transcribing(let fraction):
-            head = fraction > 0
-                ? fraction.formatted(.percent.precision(.fractionLength(0)))
-                : "Text"
+            return fraction > 0 ? percent(fraction) : "Text"
         case .waiting:
-            head = "Queued"
+            return percent(0)
         case .finished, .failed:
-            head = ""
+            return ""
         }
-        guard activeCount > 1 else { return head }
-        return head.isEmpty ? "\(activeCount)" : "\(head) · \(activeCount)"
     }
 
     /// Builds the summary from the queue. The running download wins the

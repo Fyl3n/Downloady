@@ -57,7 +57,7 @@ struct DownloadActivityRing: View {
     }
 }
 
-/// The trailing wing: the percentage, or "Finishing" while ffmpeg muxes.
+/// The trailing wing: the percentage, or "Text" before a transcript has one.
 struct DownloadActivityValue: View {
     @ObservedObject var model: DownloadModel
 
@@ -68,8 +68,8 @@ struct DownloadActivityValue: View {
             .lineLimit(1)
             .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
             .padding(.leading, DroppySpacing.sm)
-            // Swapped with a transition only when the stage changes ("42%"
-            // to "Finishing"); a percentage tick is a plain redraw, or the
+            // Swapped with a transition only when the label changes kind
+            // ("Text" to "3 %"); a percentage tick is a plain redraw, or the
             // transition replays in the notch on every tick.
             .id(stage)
             .transition(DroppyTransition.compactContent)

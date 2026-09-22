@@ -72,8 +72,9 @@ import Testing
         let summary = QueueSummary(jobs: jobs)
         #expect(summary.leading?.title == "B")
         #expect(summary.fraction == 0.25)
-        // The percentage is written the way this Mac writes percentages.
-        #expect(summary.activityLabel == "\(0.25.formatted(.percent.precision(.fractionLength(0)))) · 2")
+        // The percentage is written the way this Mac writes percentages, with
+        // no job count: it would not fit a notch wing.
+        #expect(summary.activityLabel == 0.25.formatted(.percent.precision(.fractionLength(0))))
     }
 
     @Test func aLoneTranscriptLeads() {
@@ -83,9 +84,11 @@ import Testing
     }
 
     @Test func stagesWithNoNumberGetAWord() {
-        #expect(QueueSummary(jobs: [job(.postProcessing)]).activityLabel == "Finishing")
+        // Words wider than a notch wing are cut short: stages with no number
+        // of their own show the one they amount to.
+        #expect(QueueSummary(jobs: [job(.postProcessing)]).activityLabel == 1.0.formatted(.percent.precision(.fractionLength(0))))
         #expect(QueueSummary(jobs: [job(.preparingTranscript)]).activityLabel == "Text")
-        #expect(QueueSummary(jobs: [job(.waiting)]).activityLabel == "Queued")
+        #expect(QueueSummary(jobs: [job(.waiting)]).activityLabel == 0.0.formatted(.percent.precision(.fractionLength(0))))
     }
 }
 
