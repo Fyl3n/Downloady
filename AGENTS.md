@@ -9,7 +9,7 @@ the notch, the shelf, the lock screen and the menu bar.
 
 - Droplet id: `downloady`. It is also `DownloadyDroplet.id` in Swift and `id` in `droplet.json`; the three must agree or the loader refuses the bundle.
 - Swift product: `Downloady`, a dynamic library. The harness target is `DownloadyHarness`.
-- SDK checkout: `~/Documents/droppykit` (DroppyKit 1.8.1). Docs online: https://getdroppy.app/docs/droppykit
+- SDK checkout: `~/Documents/droppykit` (DroppyKit 1.11.0). Docs online: https://getdroppy.app/docs/droppykit
 - Host: Droppy 15.3 or later, which runs an unsigned bundle once its user approves that build under Settings, Store, Local droplets and asks again each time it opens, or the free Droppy Playground (https://getdroppy.app/download/playground), which loads unsigned bundles without asking.
 
 ## The loop

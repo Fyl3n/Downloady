@@ -2,7 +2,10 @@
 //  DownloadySettingsView.swift
 //  Downloady
 //
-//  Settings, built from DroppyKit's settings rows.
+//  Settings, built from DroppyKit's settings rows. The root is
+//  `DropletSettingsPane` (DroppyKit 1.9.0): on macOS 15 and later Droppy
+//  mounts the sections in its grouped Form, the page System Settings is made
+//  of; on macOS 14 the cards draw their own chrome as before.
 //
 
 import AppKit
@@ -13,34 +16,56 @@ struct DownloadySettingsView: View {
     let droplet: DownloadyDroplet
     @ObservedObject var model: DownloadModel
 
+    /// A list of sections, never a stack: a `VStack` inside the Form is one
+    /// row. Every card inside a `DropletSettingsSection` joins its one
+    /// section, so a header goes over the first card of a group and the
+    /// cards after it are headerless sections under it, the way System
+    /// Settings stacks them. The general cards open the page with no header,
+    /// as World Clock's do: the Form styles a first section's header apart
+    /// from the others.
     var body: some View {
-        VStack(alignment: .leading, spacing: DroppySpacing.xxl) {
-            section("General") {
-                DownloadsCard(model: model)
-                TranscriptCard(model: model)
-                BrowserCard(model: model)
-            }
-            section("Compatible websites") {
+        DropletSettingsPane {
+            DownloadsCard(model: model)
+            TranscriptCard(model: model)
+            BrowserCard(model: model)
+
+            DropletSettingsSection {
+                settingsSectionHeader("Compatible websites")
+            } content: {
                 SupportedSitesCard(model: model)
             }
-            section("Providers") {
+
+            DropletSettingsSection {
+                settingsSectionHeader("Providers")
+            } content: {
                 ToolCard(model: model, tool: .ytDlp)
-                ToolCard(model: model, tool: .ffmpeg)
             }
+            ToolCard(model: model, tool: .ffmpeg)
         }
     }
+}
 
-    /// A header in Droppy's own section style over its cards.
-    private func section<Content: View>(
-        _ title: LocalizedStringKey,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        VStack(alignment: .leading, spacing: DroppySpacing.sm) {
-            settingsSectionHeader(title)
-                .padding(.leading, DroppySpacing.xs)
-            VStack(alignment: .leading, spacing: DroppySpacing.lg) {
-                content()
-            }
+extension View {
+    /// The compact height a card gives the buttons in its rows. The card drawn
+    /// by hand publishes it; the Form's card (macOS 15 and later) does not,
+    /// and a `.small` button there falls back to its own, taller size, which
+    /// pushes it below its row's title. Set again here, it is the same 24pt
+    /// in both.
+    func settingsRowButtons() -> some View {
+        droppySettingsCompactControls()
+    }
+
+    /// The padding of a row Downloady builds itself. Inside the Form (macOS
+    /// 15 and later, the check `DropletSettingsPane` makes) the Form pays a
+    /// row's padding; before that the card is drawn by hand and the row pads
+    /// itself, like the kit's rows do.
+    @ViewBuilder
+    func handBuiltSettingsRow() -> some View {
+        if #available(macOS 15.0, *) {
+            frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            frame(maxWidth: .infinity, alignment: .leading)
+                .padding(DroppySettingsLayoutMetrics.rowPadding)
         }
     }
 }
@@ -66,10 +91,11 @@ struct BrowserCard: View {
                 icon: "hand.raised",
                 infoTip: permissionTip
             ) {
-                HStack(spacing: DroppySpacing.xsm) {
+                HStack(alignment: .firstTextBaseline, spacing: DroppySpacing.xsm) {
                     allowedValue
                     permissionAction
                 }
+                .settingsRowButtons()
             }
         }
         .onAppear { model.refreshBrowserPermissions() }
@@ -118,7 +144,6 @@ struct BrowserCard: View {
             DropletValuePill(text: "No browser yet")
         } else {
             Text(Self.names(allowed))
-                .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.tail)
@@ -162,32 +187,22 @@ struct SupportedSitesCard: View {
 
     var body: some View {
         DropletSettingsCard {
-            VStack(alignment: .leading, spacing: DroppySpacing.sm) {
-                searchField
-                results
+            DropletStackedRow(title: "Find a website", icon: "magnifyingglass") {
+                VStack(alignment: .leading, spacing: DroppySpacing.sm) {
+                    searchField
+                    results
+                }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(DroppySettingsLayoutMetrics.rowPadding)
         }
         .onAppear { model.loadSupportedSites() }
         .onChange(of: model.toolStatus) { _, _ in model.loadSupportedSites() }
     }
 
+    /// A native field, so the system border and focus ring stay intact.
     private var searchField: some View {
-        HStack(spacing: DroppySpacing.xsm) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-            TextField("Search a website", text: $query)
-                .textFieldStyle(.plain)
-                .font(.system(size: 12))
-        }
-        .padding(.horizontal, DroppySpacing.sm)
-        .padding(.vertical, DroppySpacing.xs)
-        .background(
-            RoundedRectangle(cornerRadius: DroppyRadius.sm, style: .continuous)
-                .fill(AdaptiveColors.overlayAuto(0.08))
-        )
+        TextField("Search a website", text: $query, prompt: Text("Search a website"))
+            .textFieldStyle(.roundedBorder)
+            .labelsHidden()
     }
 
     @ViewBuilder
@@ -259,14 +274,14 @@ struct TranscriptCard: View {
                     ?? "Runs after the download, in the background. The audio never leaves this Mac."
             ) {
                 statusControl
+                    .settingsRowButtons()
             }
             if let reason = model.transcriptionUnavailableReason {
                 Label(reason, systemImage: "info.circle")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(DroppySettingsLayoutMetrics.rowPadding)
+                    .handBuiltSettingsRow()
             }
         }
         .animation(DroppyAnimation.state, value: model.transcriptionUnavailableReason)
@@ -319,16 +334,16 @@ struct ToolCard: View {
                 icon: tool == .ytDlp ? "arrow.down.circle" : "film",
                 infoTip: statusTip
             ) {
-                HStack(spacing: DroppySpacing.xsm) {
+                HStack(alignment: .firstTextBaseline, spacing: DroppySpacing.xsm) {
                     if tool == .ytDlp, let message = model.toolUpdateMessage {
                         Text(message)
-                            .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
                     pills
                     action
                 }
+                .settingsRowButtons()
             }
             DropletSettingsDivider()
             settingsUnifiedPickerRow(
@@ -362,8 +377,7 @@ struct ToolCard: View {
                         pathField
                     }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(DroppySettingsLayoutMetrics.rowPadding)
+                .handBuiltSettingsRow()
             }
         }
         .animation(DroppyAnimation.state, value: showsPath)
@@ -440,19 +454,16 @@ struct ToolCard: View {
 
     private var pathField: some View {
         HStack(spacing: DroppySpacing.xsm) {
-            TextField("/opt/homebrew/bin/\(tool.name)", text: $path)
-                .textFieldStyle(.plain)
+            // Native, so the system border and focus ring stay intact.
+            TextField("\(tool.name) path", text: $path, prompt: Text("/opt/homebrew/bin/\(tool.name)"))
+                .textFieldStyle(.roundedBorder)
+                .labelsHidden()
                 .font(.system(size: 12, design: .monospaced))
-                .padding(.horizontal, DroppySpacing.sm)
-                .padding(.vertical, DroppySpacing.xs)
-                .background(
-                    RoundedRectangle(cornerRadius: DroppyRadius.sm, style: .continuous)
-                        .fill(AdaptiveColors.overlayAuto(0.08))
-                )
                 .onSubmit(commitPath)
             Button("Choose…") { choosePath() }
                 .buttonStyle(DroppyQuietButtonStyle(size: .small))
         }
+        .settingsRowButtons()
     }
 
     private func commitPath() {
@@ -490,7 +501,7 @@ struct DownloadsCard: View {
                 icon: "folder",
                 infoTip: folderTip
             ) {
-                HStack(spacing: DroppySpacing.xsm) {
+                HStack(alignment: .firstTextBaseline, spacing: DroppySpacing.xsm) {
                     if !model.downloadFolderIsWritable || model.downloadFolderMessage != nil {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .font(.system(size: 11))
@@ -501,6 +512,7 @@ struct DownloadsCard: View {
                     Button("Choose…") { chooseFolder() }
                         .buttonStyle(DroppyQuietButtonStyle(size: .small))
                 }
+                .settingsRowButtons()
             }
             DropletSettingsDivider()
             DropletStackedRow(
