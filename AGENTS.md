@@ -115,9 +115,11 @@ package pins; `droppykit update` moves both to the newest release. A build that 
 - **Look like Droppy, not like a guest.** Surfaces are dark. Foreground colours come from
   `AdaptiveColors`, spacing from `DroppySpacing`, radii from `DroppyRadius` with
   `style: .continuous`. No borders or outlines, no gradients, no ALL-CAPS labels, sentence
-  case everywhere, and never paint your own background on a widget. Settings panes are built
-  from `DropletSettingsCard`, `DropletControlRow`, `DropletToggleRow`, `DropletStackedRow`
-  and `DropletSliderRow`.
+  case everywhere, and never paint your own background on a widget. Settings panes are rooted
+  in `DropletSettingsPane` (`minAPI` 1.9.0) and built from `DropletSettingsCard`,
+  `DropletSettingsSection`, `DropletControlRow`, `DropletToggleRow`, `DropletStackedRow` and
+  `DropletSliderRow`; the host mounts the pane in its native grouped form, so the pane's
+  content is a list of sections, never a `VStack`, and it places no dividers.
 - **`droplet.json` is the truth for the build.** `Info.plist` is generated from it.
   `version` is numeric `major.minor.patch`; `summary` is at most 60 characters;
   `minAppVersion` stays `15.3.0` unless the droplet needs something newer; `kit.minAPI` is
@@ -187,8 +189,13 @@ Your own build runs in Droppy only after you approve it under Settings, Store, L
 droplets, and Droppy asks again each time it opens; everyone else gets the droplet from
 the Store, signed by Droppy after review.
 When the droplet is done: replace the placeholder icon and creator avatar, fill in
-`creator` and `source` in `droplet.json`, push the repository, and run `droppykit submit`. It
-opens getdroppy.app/submit-droplet with the repository, commit and id filled in.
+`creator` and `source` in `droplet.json`, write `CHANGELOG.md`, and run `droppykit submit`.
+The Store is a repository (gitlab.com/droppyformac1/droplets, one folder per droplet):
+`submit` forks it, copies this package into `droplets/<id>/`, pushes a branch and opens
+the merge request; when a maintainer merges it, the pipeline builds, signs and publishes
+it. `droppykit submit --print` shows the plan without doing it (needs `glab`, signed in).
+Opening the merge request means accepting the Droplet developer terms at
+https://getdroppy.app/droplet-developer-terms.
 
 ## Downloady project notes
 
