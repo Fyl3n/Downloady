@@ -28,7 +28,8 @@ struct URLBar: View {
             }
             TextField(
                 "Paste a video link",
-                text: Binding(get: { model.urlText }, set: { model.userEditedURL($0) })
+                // A write-back of the same text (editing ends) is not an edit.
+                text: Binding(get: { model.urlText }, set: { if $0 != model.urlText { model.userEditedURL($0) } })
             )
             .textFieldStyle(.plain)
             .font(.system(size: 12))
@@ -123,7 +124,6 @@ struct FormatPickers: View {
                     ForEach(VideoContainer.allCases) { container in
                         Label(container.title, systemImage: "film")
                             .tag(container)
-                            .disabled(!availability.containers.contains(container))
                     }
                 }
                 .disabled(options.wrappedValue.quality == .audioOnly)
@@ -131,7 +131,6 @@ struct FormatPickers: View {
                     ForEach(audioChoices) { audio in
                         Label(audio.title, systemImage: "waveform")
                             .tag(audio)
-                            .disabled(!availability.audioFormats.contains(audio))
                     }
                 }
             }

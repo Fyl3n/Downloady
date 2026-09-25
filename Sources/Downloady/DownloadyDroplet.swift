@@ -14,8 +14,6 @@ import SwiftUI
 /// `NSPrincipalClass`. Keep it empty: it runs before the host is ready.
 @objc(DownloadyPrincipal)
 public final class DownloadyPrincipal: NSObject, DropletPrincipal {
-    public override init() { super.init() }
-
     @MainActor public func makeDroplet() -> AnyObject { DownloadyDroplet() }
 }
 
@@ -80,10 +78,7 @@ public final class DownloadyDroplet: NSObject, ObservableObject, Droplet {
             hudFile = nil
         }
         activitySubject.send(nil)
-        // The host unregisters the shortcuts on deactivate; this says so here.
-        for action in QuickAction.allCases {
-            host?.shortcuts.unregister(id: action.rawValue)
-        }
+        // The host unregisters the shortcuts on deactivate.
         model.stop()
         host = nil
     }
@@ -124,13 +119,18 @@ public final class DownloadyDroplet: NSObject, ObservableObject, Droplet {
         _ = host?.workspace.openSettings()
     }
 
+    /// Droppy's Settings, Shortcuts page, on Downloady's section.
+    func openShortcuts() {
+        _ = host?.workspace.openShortcuts()
+    }
+
     // MARK: Quick actions
 
     /// Global shortcuts the user binds in Droppy's Settings, Shortcuts page.
     /// DroppyKit has no quick-action surface of its own, so these are how the
     /// rest of Droppy reaches Downloady. None ships with a default binding.
     enum QuickAction: String, CaseIterable {
-        case open = "open"
+        case open
         case downloadFrontTab = "download-front-tab"
         case downloadPasted = "download-pasted"
         case downloadFrontTabAudio = "download-front-tab-audio"
@@ -209,8 +209,6 @@ extension DownloadyDroplet: ShelfWidgetProviding {
     public func makeWidgetView(_ id: ShelfWidgetID, context: ShelfWidgetContext) -> AnyView {
         AnyView(DownloadyWidget(droplet: self, model: model, context: context))
     }
-
-    public func makeWidgetSettingsPopover(_ id: ShelfWidgetID) -> AnyView? { nil }
 }
 
 // MARK: - Expanded surface

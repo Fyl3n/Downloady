@@ -36,6 +36,8 @@ public struct DownloadJob: Identifiable, Equatable, Sendable {
     public let subtitleLanguage: String
     /// The media's length, for the transcription progress.
     public let duration: Double?
+    /// The folder checked when the job was queued; `nil` is the current setting.
+    public let folder: URL?
     public var state: State
     /// The media file, once yt-dlp reported it.
     public var file: URL?
@@ -49,6 +51,7 @@ public struct DownloadJob: Identifiable, Equatable, Sendable {
         options: DownloadOptions,
         subtitleLanguage: String = "en",
         duration: Double? = nil,
+        folder: URL? = nil,
         state: State = .waiting,
         file: URL? = nil,
         transcript: URL? = nil
@@ -59,6 +62,7 @@ public struct DownloadJob: Identifiable, Equatable, Sendable {
         self.options = options
         self.subtitleLanguage = subtitleLanguage
         self.duration = duration
+        self.folder = folder
         self.state = state
         self.file = file
         self.transcript = transcript
@@ -179,8 +183,6 @@ public struct QueueSummary: Equatable, Sendable {
         self.activeCount = activeCount
         self.leading = leading
     }
-
-    public static let idle = QueueSummary(activeCount: 0, leading: nil)
 
     public var isActive: Bool { activeCount > 0 }
 

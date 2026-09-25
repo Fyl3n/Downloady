@@ -49,8 +49,6 @@ import Testing
         #expect(info.formats?.count == 8)
         let availability = FormatAvailability(info: info)
         #expect(availability.qualities == [.best, .p720, .p480, .audioOnly])
-        #expect(availability.containers == Set(VideoContainer.allCases))
-        #expect(availability.audioFormats == Set(AudioFormat.allCases))
     }
 
     @Test func audioOnlySourcesOfferOnlyAudio() throws {
@@ -72,21 +70,17 @@ import Testing
     }
 
     @Test func fallbackStepsDown() {
-        let availability = FormatAvailability(
-            qualities: [.best, .p720, .p480, .audioOnly],
-            containers: Set(VideoContainer.allCases),
-            audioFormats: Set(AudioFormat.allCases)
-        )
+        let availability = FormatAvailability(qualities: [.best, .p720, .p480, .audioOnly])
         #expect(availability.fallback(for: .p1080) == .p720)
         #expect(availability.fallback(for: .p2160) == .p720)
         #expect(availability.fallback(for: .p480) == .p480)
         #expect(availability.fallback(for: .best) == .best)
 
-        let audio = FormatAvailability(qualities: [.audioOnly], containers: [], audioFormats: [])
+        let audio = FormatAvailability(qualities: [.audioOnly])
         #expect(audio.fallback(for: .p1080) == .audioOnly)
         #expect(audio.fallback(for: .best) == .audioOnly)
 
-        let low = FormatAvailability(qualities: [.best, .audioOnly], containers: [], audioFormats: [])
+        let low = FormatAvailability(qualities: [.best, .audioOnly])
         #expect(low.fallback(for: .p480) == .best)
     }
 }

@@ -25,14 +25,16 @@ public struct SupportedBrowser: Equatable, Sendable {
     public let name: String
     public let family: Family
 
-    /// The AppleScript that returns the front tab's URL.
+    /// The AppleScript that returns the front tab's URL. A hung browser gives
+    /// up after 20 seconds instead of the system's two minutes, which would
+    /// hold every later read behind it (they share one queue). Long enough for
+    /// the Automation prompt a first read can put up.
     public var script: String {
-        switch family {
-        case .safari:
-            "tell application id \"\(bundleID)\" to return URL of front document"
-        case .chromium:
-            "tell application id \"\(bundleID)\" to return URL of active tab of front window"
+        let read = switch family {
+        case .safari: "URL of front document"
+        case .chromium: "URL of active tab of front window"
         }
+        return "with timeout of 20 seconds\ntell application id \"\(bundleID)\" to return \(read)\nend timeout"
     }
 
     public static let all: [SupportedBrowser] = [
@@ -65,39 +67,8 @@ public enum BrowserReadOutcome: Equatable, Sendable {
     case nothing
     /// macOS refused the Apple event (error -1743).
     case notAuthorized(SupportedBrowser)
-
-    public var url: URL? {
-        if case .url(let url, _) = self { return url }
-        return nil
-    }
 }
 
-@MainActor
-public protocol BrowserURLProviding: AnyObject {
-    /// Reads the front tab of the most recent frontmost supported browser.
-    func currentURL() async -> BrowserReadOutcome
-
-    /// Starts calling `onChange` with a read whenever a supported browser
-    /// becomes frontmost and `shouldRead` agrees, then again every
-    /// `pollInterval` while it stays in front and its tab holds still, so a
-    /// tab switched inside the browser is seen too. The browser is remembered
-    /// either way, so `currentURL()` knows which one to ask. `stop()` tears
-    /// it down.
-    func start(
-        shouldRead: @escaping @MainActor () -> Bool,
-        onChange: @escaping @MainActor (BrowserReadOutcome) -> Void
-    )
-
-    func stop()
-
-    /// Remembers the frontmost application if it is a supported browser, so
-    /// the next `currentURL()` asks it. For a quick action fired from a
-    /// browser while auto-fill is off and nothing is being watched.
-    func rememberFrontmostApplication()
-}
-
-/// The real implementation.
-///
 /// Remembers the most recent frontmost supported browser (opening Droppy's
 /// shelf does not activate Droppy, and an activation of Droppy itself is
 /// ignored), and reads its front tab with `NSAppleScript` on a private serial
@@ -107,7 +78,7 @@ public protocol BrowserURLProviding: AnyObject {
 /// the browser stays in front: a poll is reported only once two reads in a
 /// row agree, so flicking through tabs reports nothing until one sticks.
 @MainActor
-public final class BrowserURLProvider: BrowserURLProviding {
+public final class BrowserURLProvider {
     private let log: @MainActor (String) -> Void
     private var observer: NSObjectProtocol?
     private var onChange: (@MainActor (BrowserReadOutcome) -> Void)?
@@ -125,6 +96,7 @@ public final class BrowserURLProvider: BrowserURLProviding {
         self.log = log
     }
 
+    /// Reads the front tab of the most recent frontmost supported browser.
     public func currentURL() async -> BrowserReadOutcome {
         if let inFlight { return await inFlight.value }
         guard let browser = lastBrowser else { return .nothing }
@@ -146,6 +118,12 @@ public final class BrowserURLProvider: BrowserURLProviding {
         return outcome
     }
 
+    /// Starts calling `onChange` with a read whenever a supported browser
+    /// becomes frontmost and `shouldRead` agrees, then again every
+    /// `pollInterval` while it stays in front and its tab holds still, so a
+    /// tab switched inside the browser is seen too. The browser is remembered
+    /// either way, so `currentURL()` knows which one to ask. `stop()` tears
+    /// it down.
     public func start(
         shouldRead: @escaping @MainActor () -> Bool,
         onChange: @escaping @MainActor (BrowserReadOutcome) -> Void
@@ -181,6 +159,9 @@ public final class BrowserURLProvider: BrowserURLProviding {
         activationTask = nil
     }
 
+    /// Remembers the frontmost application if it is a supported browser, so
+    /// the next `currentURL()` asks it. For a quick action fired from a
+    /// browser while auto-fill is off and nothing is being watched.
     public func rememberFrontmostApplication() {
         remember(NSWorkspace.shared.frontmostApplication)
     }
@@ -271,13 +252,11 @@ public final class BrowserURLProvider: BrowserURLProviding {
 
     /// Error -1743: the user (or the system) has not allowed Automation.
     nonisolated static let notAuthorizedError = -1743
-    /// Error -600: the application is not running.
-    nonisolated static let notRunningError = -600
 
     nonisolated static func outcome(for result: ScriptResult, browser: SupportedBrowser) -> BrowserReadOutcome {
         switch result {
         case .string(let text):
-            guard let url = acceptedURL(from: text) else { return .nothing }
+            guard let url = text.flatMap(DownloadModel.webURL) else { return .nothing }
             return .url(url, browser)
         case .error(notAuthorizedError):
             return .notAuthorized(browser)
@@ -285,16 +264,6 @@ public final class BrowserURLProvider: BrowserURLProviding {
             // -600 (not running), -1728 (no window) and the rest: nothing to read.
             return .nothing
         }
-    }
-
-    /// The URL when `text` is an http or https address with a host.
-    nonisolated static func acceptedURL(from text: String?) -> URL? {
-        guard let trimmed = text?.trimmingCharacters(in: .whitespacesAndNewlines),
-              let url = URL(string: trimmed),
-              let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
-              url.host?.isEmpty == false
-        else { return nil }
-        return url
     }
 }
 

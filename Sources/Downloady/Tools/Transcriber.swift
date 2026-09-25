@@ -52,27 +52,7 @@ public enum TranscriptionEvent: Equatable, Sendable {
 }
 
 @MainActor
-public protocol Transcribing: AnyObject {
-    /// Whether this Mac can transcribe at all (macOS 26 or later).
-    nonisolated var isSupported: Bool { get }
-
-    /// Transcribes `media` and writes a `.srt` beside it. `duration` is the
-    /// media's length in seconds, used for progress. Cancelling the consuming
-    /// task stops ffmpeg and the analyzer.
-    func transcribe(
-        media: URL,
-        duration: Double?,
-        ffmpeg: URL?,
-        onEvent: @escaping @MainActor (TranscriptionEvent) -> Void
-    ) async throws -> URL
-
-    /// Stops everything. Called from `deactivate()`.
-    func cancelAll()
-}
-
-/// The real implementation.
-@MainActor
-public final class SpeechTranscriptionService: Transcribing {
+public final class SpeechTranscriptionService {
     private let log: @MainActor (String) -> Void
     private var running: [ObjectIdentifier: ChildProcess] = [:]
 
@@ -80,10 +60,14 @@ public final class SpeechTranscriptionService: Transcribing {
         self.log = log
     }
 
+    /// Whether this Mac can transcribe at all (macOS 26 or later).
     public nonisolated var isSupported: Bool {
         if #available(macOS 26, *) { true } else { false }
     }
 
+    /// Transcribes `media` and writes a `.srt` beside it. `duration` is the
+    /// media's length in seconds, used for progress. Cancelling the consuming
+    /// task stops ffmpeg and the analyzer.
     public func transcribe(
         media: URL,
         duration: Double?,
@@ -114,6 +98,7 @@ public final class SpeechTranscriptionService: Transcribing {
         return destination
     }
 
+    /// Stops everything. Called from `deactivate()`.
     public func cancelAll() {
         for child in running.values { child.terminate() }
         running.removeAll()

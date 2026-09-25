@@ -28,10 +28,6 @@ public struct MediaFormat: Codable, Equatable, Sendable {
         self.acodec = acodec
         self.height = height
     }
-
-    /// yt-dlp writes `"none"` for a missing stream.
-    public var hasVideo: Bool { vcodec.map { $0 != "none" } ?? false }
-    public var hasAudio: Bool { acodec.map { $0 != "none" } ?? false }
 }
 
 /// One entry of `subtitles` or `automatic_captions` in `yt-dlp -J` output.
@@ -135,19 +131,11 @@ public struct MediaInfo: Codable, Equatable, Sendable {
 /// means everything is offered, and yt-dlp falls back on its own.
 public struct FormatAvailability: Equatable, Sendable {
     public var qualities: Set<DownloadQuality>
-    public var containers: Set<VideoContainer>
-    public var audioFormats: Set<AudioFormat>
 
-    public static let unrestricted = FormatAvailability(
-        qualities: Set(DownloadQuality.allCases),
-        containers: Set(VideoContainer.allCases),
-        audioFormats: Set(AudioFormat.allCases)
-    )
+    public static let unrestricted = FormatAvailability(qualities: Set(DownloadQuality.allCases))
 
-    public init(qualities: Set<DownloadQuality>, containers: Set<VideoContainer>, audioFormats: Set<AudioFormat>) {
+    public init(qualities: Set<DownloadQuality>) {
         self.qualities = qualities
-        self.containers = containers
-        self.audioFormats = audioFormats
     }
 
     /// Derives availability from the formats yt-dlp reported.
@@ -184,11 +172,7 @@ public struct FormatAvailability: Equatable, Sendable {
             // Nothing recognisable: let yt-dlp decide rather than block everything.
             qualities = Set(DownloadQuality.allCases)
         }
-        self.init(
-            qualities: qualities,
-            containers: Set(VideoContainer.allCases),
-            audioFormats: Set(AudioFormat.allCases)
-        )
+        self.init(qualities: qualities)
     }
 
     /// The quality to use when `quality` is not available: the next lower

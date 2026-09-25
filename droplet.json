@@ -7,7 +7,7 @@
   "category": "Media",
   "kit": {
     "abi": 1,
-    "minAPI": "1.9.0"
+    "minAPI": "1.16.0"
   },
   "minAppVersion": "15.3.0",
   "capabilities": [
@@ -17,6 +17,7 @@
     "network-client",
     "downloads",
     "apple-events",
+    "clipboard-write",
     "speech-recognition",
     "global-shortcuts"
   ],

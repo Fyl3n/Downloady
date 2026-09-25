@@ -25,10 +25,6 @@ public struct SupportedSites: Equatable, Sendable {
     /// The generic extractor is the fallback that scans any page, not a site.
     static let excluded: Set<String> = ["generic"]
 
-    public init(sites: [SupportedSite]) {
-        self.sites = sites
-    }
-
     /// Parses `yt-dlp --list-extractors`: one extractor per line.
     public init(listOutput: String) {
         struct Entry {

@@ -19,25 +19,24 @@ import Testing
 
     @Test func scriptsAddressTheBrowserByID() {
         let safari = SupportedBrowser.matching(bundleID: "com.apple.Safari")!
-        #expect(safari.script == "tell application id \"com.apple.Safari\" to return URL of front document")
+        #expect(safari.script == "with timeout of 20 seconds\ntell application id \"com.apple.Safari\" to return URL of front document\nend timeout")
         let arc = SupportedBrowser.matching(bundleID: "company.thebrowser.Browser")!
-        #expect(arc.script.hasSuffix("URL of active tab of front window"))
+        #expect(arc.script.hasSuffix("URL of active tab of front window\nend timeout"))
     }
 }
 
 @Suite struct BrowserURLFilterTests {
     @Test func acceptsHTTPAndHTTPS() {
-        #expect(BrowserURLProvider.acceptedURL(from: "https://www.youtube.com/watch?v=jNQXAC9IVRw") != nil)
-        #expect(BrowserURLProvider.acceptedURL(from: " http://example.com/a \n")?.absoluteString == "http://example.com/a")
-        #expect(BrowserURLProvider.acceptedURL(from: "HTTPS://example.com") != nil)
+        #expect(DownloadModel.webURL(from: "https://www.youtube.com/watch?v=jNQXAC9IVRw") != nil)
+        #expect(DownloadModel.webURL(from: " http://example.com/a \n")?.absoluteString == "http://example.com/a")
+        #expect(DownloadModel.webURL(from: "HTTPS://example.com") != nil)
     }
 
     @Test func rejectsEverythingElse() {
         for text in ["file:///Users/me/a.mp4", "about:blank", "favorites://", "chrome://newtab/",
                      "arc://start", "javascript:alert(1)", "", "missing value", "https://", "not a url"] {
-            #expect(BrowserURLProvider.acceptedURL(from: text) == nil, "\(text)")
+            #expect(DownloadModel.webURL(from: text) == nil, "\(text)")
         }
-        #expect(BrowserURLProvider.acceptedURL(from: nil) == nil)
     }
 
     @Test func mapsScriptResults() {

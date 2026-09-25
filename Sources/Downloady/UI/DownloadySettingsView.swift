@@ -25,9 +25,13 @@ struct DownloadySettingsView: View {
     /// from the others.
     var body: some View {
         DropletSettingsPane {
+            if !model.unavailableTools.isEmpty {
+                MissingToolsCard(model: model)
+            }
             DownloadsCard(model: model)
             TranscriptCard(model: model)
             BrowserCard(model: model)
+            ShortcutsCard(droplet: droplet)
 
             DropletSettingsSection {
                 settingsSectionHeader("Compatible websites")
@@ -41,20 +45,12 @@ struct DownloadySettingsView: View {
                 ToolCard(model: model, tool: .ytDlp)
             }
             ToolCard(model: model, tool: .ffmpeg)
+            ToolCard(model: model, tool: .deno)
         }
     }
 }
 
 extension View {
-    /// The compact height a card gives the buttons in its rows. The card drawn
-    /// by hand publishes it; the Form's card (macOS 15 and later) does not,
-    /// and a `.small` button there falls back to its own, taller size, which
-    /// pushes it below its row's title. Set again here, it is the same 24pt
-    /// in both.
-    func settingsRowButtons() -> some View {
-        droppySettingsCompactControls()
-    }
-
     /// The padding of a row Downloady builds itself. Inside the Form (macOS
     /// 15 and later, the check `DropletSettingsPane` makes) the Form pays a
     /// row's padding; before that the card is drawn by hand and the row pads
@@ -66,6 +62,29 @@ extension View {
         } else {
             frame(maxWidth: .infinity, alignment: .leading)
                 .padding(DroppySettingsLayoutMetrics.rowPadding)
+        }
+    }
+}
+
+/// Where the quick actions' shortcuts are bound: Droppy's Shortcuts page
+/// lists them in Downloady's section (DroppyKit 1.16.0).
+struct ShortcutsCard: View {
+    let droplet: DownloadyDroplet
+
+    var body: some View {
+        DropletSettingsCard {
+            DropletControlRow(
+                title: "Keyboard shortcuts",
+                icon: "keyboard",
+                infoTip: "Open Downloady, or download the current tab or the pasted link, from anywhere."
+            ) {
+                Button("Edit") { droplet.openShortcuts() }
+                    .buttonStyle(DroppyQuietButtonStyle(size: .small))
+                    // Every row button sets this: the Form's card (macOS 15+)
+                    // does not publish the compact 24pt height the hand-drawn
+                    // card does, and a `.small` button there drops below its title.
+                    .droppySettingsCompactControls()
+            }
         }
     }
 }
@@ -95,7 +114,7 @@ struct BrowserCard: View {
                     allowedValue
                     permissionAction
                 }
-                .settingsRowButtons()
+                .droppySettingsCompactControls()
             }
         }
         .onAppear { model.refreshBrowserPermissions() }
@@ -274,7 +293,7 @@ struct TranscriptCard: View {
                     ?? "Runs after the download, in the background. The audio never leaves this Mac."
             ) {
                 statusControl
-                    .settingsRowButtons()
+                    .droppySettingsCompactControls()
             }
             if let reason = model.transcriptionUnavailableReason {
                 Label(reason, systemImage: "info.circle")
@@ -316,8 +335,8 @@ struct TranscriptCard: View {
     }
 }
 
-/// One tool: its version and where it comes from, with Install / Update,
-/// the source picker (Downloady's copy, this Mac's, a custom path) and, for
+/// One tool: what it does, its version with Install, any newer release
+/// with the way to get it, the source picker (Downloady's copy, this Mac's, a custom path) and, for
 /// Custom, the path field in the same card.
 struct ToolCard: View {
     @ObservedObject var model: DownloadModel
@@ -331,19 +350,31 @@ struct ToolCard: View {
         DropletSettingsCard {
             DropletControlRow(
                 title: tool.name,
-                icon: tool == .ytDlp ? "arrow.down.circle" : "film",
-                infoTip: statusTip
+                icon: Self.icon(for: tool),
+                infoTip: location?.url.path
             ) {
-                HStack(alignment: .firstTextBaseline, spacing: DroppySpacing.xsm) {
-                    if tool == .ytDlp, let message = model.toolUpdateMessage {
+                Text(Self.summary(of: tool))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.trailing)
+            }
+            DropletSettingsDivider()
+            DropletControlRow(title: "Version", icon: "tag") {
+                HStack(alignment: .center, spacing: DroppySpacing.xsm) {
+                    if let message = model.toolUpdateMessages[tool] {
                         Text(message)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
                     pills
-                    action
+                    updateStatus
+                    installButton
                 }
-                .settingsRowButtons()
+                .droppySettingsCompactControls()
+            }
+            // Only once every check is back, so a stale offer never shows.
+            if !model.isCheckingTools, let update = model.toolUpdates[tool] {
+                DropletSettingsDivider()
+                updateRow(update)
             }
             DropletSettingsDivider()
             settingsUnifiedPickerRow(
@@ -382,15 +413,20 @@ struct ToolCard: View {
         }
         .animation(DroppyAnimation.state, value: showsPath)
         .animation(DroppyAnimation.state, value: notice)
+        .animation(DroppyAnimation.state, value: model.isCheckingTools)
         .onAppear {
-            if tool == .ytDlp { model.checkForYtDlpUpdate() }
+            // Once per pane: the user may have updated a tool in Terminal since.
+            if tool == .ytDlp { model.refreshTools() }
             path = model.customPath(for: tool) ?? ""
         }
+        // A path chosen elsewhere (the missing-tools card) replaces the field,
+        // so closing the pane does not commit the old text over it.
+        .onChange(of: model.customPath(for: tool)) { _, stored in path = stored ?? "" }
         .onDisappear { commitPath() }
     }
 
     private var location: ToolLocation? {
-        tool == .ytDlp ? model.toolStatus.ytDlp : model.detectedFFmpeg
+        model.location(of: tool)
     }
 
     private var isInstalling: Bool { model.installingTools.contains(tool) }
@@ -405,32 +441,98 @@ struct ToolCard: View {
             }
         } else if let location {
             DropletValuePill(text: location.version ?? "Unknown version")
-        } else if tool == .ytDlp, model.toolStatus == .unknown {
+        } else if model.isCheckingTools || (tool == .ytDlp && model.toolStatus == .unknown) {
             DropletValuePill(text: "Checking…")
         } else {
             DropletValuePill(text: "Not found")
         }
     }
 
+    /// Right of the version: the check running, then its verdict. Nothing
+    /// when an update was found (its own line says so) or the check could
+    /// not tell.
     @ViewBuilder
-    private var action: some View {
-        if tool == .ytDlp, location?.source == .managed, model.ytDlpUpdate != nil {
-            Button(model.isUpdatingTools ? "Updating…" : "Update") { model.updateYtDlp() }
-                .buttonStyle(DroppyAccentButtonStyle(size: .small))
-                .disabled(model.isUpdatingTools)
-                .help("yt-dlp \(model.ytDlpUpdate ?? "") is available")
-        } else if location == nil, !isInstalling, model.source(for: tool) == .managed, model.toolStatus != .unknown {
+    private var updateStatus: some View {
+        if location != nil, !isInstalling {
+            if model.isCheckingTools {
+                HStack(spacing: 2) {
+                    Text("(")
+                    ProgressView().controlSize(.mini)
+                    Text("Checking for updates…)")
+                }
+                .foregroundStyle(.secondary)
+                .transition(DroppyTransition.element)
+            } else if model.upToDateTools.contains(tool) {
+                Text("(Up to date)")
+                    .foregroundStyle(.secondary)
+                    .transition(DroppyTransition.element)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var installButton: some View {
+        if location == nil, !isInstalling, model.source(for: tool) == .managed, model.toolStatus != .unknown {
             // The automatic install failed: the same install, by hand.
             Button("Install") { model.installTools() }
                 .buttonStyle(DroppyAccentButtonStyle(size: .small))
         }
     }
 
-    private var statusTip: String {
-        if let location { return location.url.path }
+    /// A newer release. Downloady updates its own copy; it does not change
+    /// what it did not install: for the Mac's copy it hands over the
+    /// command, or runs it in Terminal where the user watches it and answers
+    /// any password prompt.
+    private func updateRow(_ update: ToolUpdate) -> some View {
+        DropletControlRow(
+            title: "\(update.version) is available",
+            icon: "arrow.up.circle",
+            infoTip: updateTip(update)
+        ) {
+            HStack(spacing: DroppySpacing.xsm) {
+                if location?.source == .managed {
+                    Button {
+                        model.updateTool(tool)
+                    } label: {
+                        Label(model.updatingTool == tool ? "Updating…" : "Update", systemImage: "arrow.up")
+                    }
+                    .buttonStyle(DroppyAccentButtonStyle(size: .small))
+                    .disabled(model.updatingTool != nil)
+                } else if update.command != nil {
+                    Button { model.copyUpdateCommand(for: tool) } label: {
+                        Label("Copy command", systemImage: "doc.on.doc")
+                    }
+                    .buttonStyle(DroppyQuietButtonStyle(size: .small))
+                    Button { model.runUpdateCommand(for: tool) } label: {
+                        Label("Update in Terminal", systemImage: "arrow.up")
+                    }
+                    .buttonStyle(DroppyAccentButtonStyle(size: .small))
+                }
+            }
+            .droppySettingsCompactControls()
+        }
+    }
+
+    private func updateTip(_ update: ToolUpdate) -> String {
+        if location?.source == .managed { return "Downloady downloads it and replaces its copy." }
+        if let command = update.command { return "Updates the copy on this Mac with: \(command)" }
+        return "Update it the way you installed it."
+    }
+
+    /// What the tool does, for someone who has never heard of it.
+    static func summary(of tool: ToolLocation.Tool) -> String {
         switch tool {
-        case .ytDlp: return "Downloads the video. Downloady keeps its own copy up to date."
-        case .ffmpeg: return "Merges video and audio and converts between formats."
+        case .ytDlp: "Finds the video on the page and downloads it."
+        case .ffmpeg: "Joins video and sound, and converts files to the format you pick."
+        case .deno: "Answers YouTube's checks, so every quality stays available."
+        }
+    }
+
+    static func icon(for tool: ToolLocation.Tool) -> String {
+        switch tool {
+        case .ytDlp: "arrow.down.circle"
+        case .ffmpeg: "film"
+        case .deno: "curlybraces"
         }
     }
 
@@ -438,9 +540,9 @@ struct ToolCard: View {
         switch tool {
         case .ytDlp:
             return "Downloady installs yt-dlp for you and offers updates as they come out. This Mac uses a copy you installed, for example with Homebrew; Custom uses the file you point to."
-        case .ffmpeg:
-            let found = model.systemCopy(of: .ffmpeg).map { " (found at \($0.path))" } ?? ""
-            return "This Mac uses the ffmpeg you installed\(found). Downloady downloads its own copy; Custom uses the file you point to."
+        case .ffmpeg, .deno:
+            let found = model.systemCopy(of: tool).map { " (found at \($0.path))" } ?? ""
+            return "This Mac uses the \(tool.name) you installed\(found). Downloady downloads its own copy; Custom uses the file you point to."
         }
     }
 
@@ -455,7 +557,7 @@ struct ToolCard: View {
     private var pathField: some View {
         HStack(spacing: DroppySpacing.xsm) {
             // Native, so the system border and focus ring stay intact.
-            TextField("\(tool.name) path", text: $path, prompt: Text("/opt/homebrew/bin/\(tool.name)"))
+            TextField("\(tool.name) path", text: $path, prompt: Text("/opt/homebrew/bin/\(tool.executableName)"))
                 .textFieldStyle(.roundedBorder)
                 .labelsHidden()
                 .font(.system(size: 12, design: .monospaced))
@@ -463,7 +565,7 @@ struct ToolCard: View {
             Button("Choose…") { choosePath() }
                 .buttonStyle(DroppyQuietButtonStyle(size: .small))
         }
-        .settingsRowButtons()
+        .droppySettingsCompactControls()
     }
 
     private func commitPath() {
@@ -471,6 +573,17 @@ struct ToolCard: View {
     }
 
     private func choosePath() {
+        ToolPathPanel.choose(tool, near: path) { chosen in
+            path = chosen
+            commitPath()
+        }
+    }
+}
+
+/// The open panel for a tool's executable.
+enum ToolPathPanel {
+    @MainActor
+    static func choose(_ tool: ToolLocation.Tool, near path: String = "", completion: @escaping @MainActor (String) -> Void) {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
@@ -482,11 +595,57 @@ struct ToolCard: View {
         panel.message = "Choose the \(tool.name) executable"
         panel.begin { response in
             guard response == .OK, let url = panel.url else { return }
-            Task { @MainActor in
-                path = url.path
-                commitPath()
+            Task { @MainActor in completion(url.path) }
+        }
+    }
+}
+
+/// Tools the default could not get from either source: Downloady's copy did
+/// not install and the Mac has none. On top of the page, because a missing
+/// yt-dlp stops every download.
+struct MissingToolsCard: View {
+    @ObservedObject var model: DownloadModel
+
+    var body: some View {
+        DropletSettingsCard {
+            ForEach(Array(model.unavailableTools.enumerated()), id: \.element) { index, tool in
+                if index > 0 { DropletSettingsDivider() }
+                DropletStackedRow(
+                    title: "\(tool.name) is missing",
+                    icon: "exclamationmark.triangle.fill",
+                    iconColor: Color(nsColor: .systemOrange)
+                ) {
+                    VStack(alignment: .leading, spacing: DroppySpacing.sm) {
+                        Text(Self.message(for: tool, reason: model.installFailures[tool]))
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        HStack(spacing: DroppySpacing.xsm) {
+                            Button(model.installingTools.contains(tool) ? "Installing…" : "Try again") {
+                                model.installTools()
+                            }
+                            .buttonStyle(DroppyAccentButtonStyle(size: .small))
+                            .disabled(!model.installingTools.isEmpty)
+                            Button("Choose file…") {
+                                ToolPathPanel.choose(tool) { model.chooseCustomPath($0, for: tool) }
+                            }
+                            .buttonStyle(DroppyQuietButtonStyle(size: .small))
+                        }
+                        .droppySettingsCompactControls()
+                    }
+                }
             }
         }
+    }
+
+    static func message(for tool: ToolLocation.Tool, reason: String?) -> String {
+        let impact = switch tool {
+        case .ytDlp: "Nothing can be downloaded until it is back."
+        case .ffmpeg: "Downloads still work, but video and sound may stay in separate files and formats cannot be converted."
+        case .deno: "Downloads still work, but YouTube may offer fewer qualities."
+        }
+        let why = reason.map { " (\($0))" } ?? ""
+        return "\(impact) Downloady could not install it\(why), and none was found on this Mac."
     }
 }
 
@@ -512,7 +671,7 @@ struct DownloadsCard: View {
                     Button("Choose…") { chooseFolder() }
                         .buttonStyle(DroppyQuietButtonStyle(size: .small))
                 }
-                .settingsRowButtons()
+                .droppySettingsCompactControls()
             }
             DropletSettingsDivider()
             DropletStackedRow(

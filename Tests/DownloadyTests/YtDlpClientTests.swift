@@ -47,6 +47,11 @@ import Testing
         #expect(args == ["--ignore-config", "--no-playlist", "--newline", "--no-colors", "-J", "--skip-download", "--", "https://example.com"])
     }
 
+    @Test func denoIsPassedByPath() {
+        let args = YtDlpCommand.fetchInfo(URL(string: "https://example.com")!, ffmpeg: nil, deno: URL(fileURLWithPath: "/opt/homebrew/bin/deno"))
+        #expect(Array(args.prefix(6)) == ["--ignore-config", "--no-playlist", "--newline", "--no-colors", "--js-runtimes", "deno:/opt/homebrew/bin/deno"])
+    }
+
     @Test func classifiesLines() {
         #expect(YtDlpCommand.event(forLine: "downloady  50.0%|1MiB/s|00:01") == .progress(fraction: 0.5, speed: "1MiB/s", eta: "00:01"))
         #expect(YtDlpCommand.event(forLine: "[Merger] Merging formats into \"/tmp/a.mp4\"") == .postProcessing)

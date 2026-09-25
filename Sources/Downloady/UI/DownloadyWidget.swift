@@ -109,9 +109,7 @@ struct ToolInstallRow: View {
     }
 
     private var installLabel: String {
-        model.installingTools.contains(.ffmpeg) && model.installingTools.contains(.ytDlp)
-            ? "Installing yt-dlp and ffmpeg…"
-            : "Installing yt-dlp…"
+        model.installingTools.count > 1 ? "Installing yt-dlp and its helpers…" : "Installing yt-dlp…"
     }
 
     private var message: String {

@@ -97,7 +97,6 @@ import Testing
     @Test func theFormFollowsTheJobStartedFromItsLink() {
         let model = DownloadModel()
         #expect(model.currentJob == nil)
-        #expect(model.backgroundJobs.isEmpty)
     }
 
     @Test func aTranscriptLandsBesideTheMediaItWasMadeFrom() throws {

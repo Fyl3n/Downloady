@@ -25,10 +25,28 @@ public enum PreferenceKey {
     public static let browserPermissions = "browserPermissions"
     public static let customYtDlpPath = "customYtDlpPath"
     public static let customFFmpegPath = "customFFmpegPath"
+    public static let customDenoPath = "customDenoPath"
     /// `ToolLocation.Source` raw values. Unset: yt-dlp is Downloady's copy,
-    /// ffmpeg the Mac's when there is one.
+    /// ffmpeg and Deno the Mac's when there is one.
     public static let ytDlpSource = "ytDlpSource"
     public static let ffmpegSource = "ffmpegSource"
+    public static let denoSource = "denoSource"
+
+    static func customPath(for tool: ToolLocation.Tool) -> String {
+        switch tool {
+        case .ytDlp: customYtDlpPath
+        case .ffmpeg: customFFmpegPath
+        case .deno: customDenoPath
+        }
+    }
+
+    static func source(for tool: ToolLocation.Tool) -> String {
+        switch tool {
+        case .ytDlp: ytDlpSource
+        case .ffmpeg: ffmpegSource
+        case .deno: denoSource
+        }
+    }
 }
 
 /// When auto-fill reads the browser's tab while the shelf is closed, so the
@@ -129,27 +147,36 @@ public final class DownloadModel: ObservableObject {
     @Published public private(set) var phase: Phase = .idle
     @Published public private(set) var toolStatus: ToolStatus = .unknown {
         didSet {
-            if toolStatus.isReady { detectedFFmpeg = toolStatus.ffmpeg }
+            if toolStatus.isReady { detectedHelpers = Self.helpers(in: toolStatus) }
             // A link typed before yt-dlp was ready is looked up now.
             if toolStatus.isReady, !oldValue.isReady, phase == .idle, !urlText.isEmpty {
                 fetchInfo()
             }
         }
     }
-    /// ffmpeg as Settings shows it: from `toolStatus` when ready, otherwise
-    /// looked up on its own so a missing yt-dlp does not hide it.
-    @Published public private(set) var detectedFFmpeg: ToolLocation?
+    /// ffmpeg and Deno as Settings shows them: from `toolStatus` when ready,
+    /// otherwise looked up on their own so a missing yt-dlp does not hide them.
+    @Published public private(set) var detectedHelpers: [ToolLocation.Tool: ToolLocation] = [:]
     /// What the running install is fetching, for the progress label.
     @Published public private(set) var installingTools: Set<ToolLocation.Tool> = []
     /// Why a tool's source changed or its install failed, shown in its card.
     @Published public private(set) var toolNotices: [ToolLocation.Tool: String] = [:]
-    /// An update check is running.
-    @Published public private(set) var isUpdatingTools = false
-    /// The outcome of the last update check, for Settings.
-    @Published public private(set) var toolUpdateMessage: String?
-    /// The newer yt-dlp release, when one was found. Settings offers Update
-    /// only while this is set.
-    @Published public private(set) var ytDlpUpdate: String?
+    /// The Downloady copy being updated.
+    @Published public private(set) var updatingTool: ToolLocation.Tool?
+    /// The outcome of the last update, per tool, for Settings.
+    @Published public private(set) var toolUpdateMessages: [ToolLocation.Tool: String] = [:]
+    /// The versions and the newer releases are being looked up again; Settings
+    /// shows a spinner and holds the update offers back until it is done.
+    @Published public private(set) var isCheckingTools = false
+    /// Newer releases found for the copies in use, wherever they come from.
+    /// Settings offers Update, or the upgrade command, only for these.
+    @Published public private(set) var toolUpdates: [ToolLocation.Tool: ToolUpdate] = [:]
+    /// Why Downloady's copy of each tool failed to install this session. A
+    /// relaunch forgets it, so the preferred source is tried again then.
+    @Published public private(set) var installFailures: [ToolLocation.Tool: String] = [:]
+    /// Tools whose last check found them current. A check that could not
+    /// tell (offline, no version) leaves a tool out: no "Up to date" then.
+    @Published public private(set) var upToDateTools: Set<ToolLocation.Tool> = []
 
     /// The queue: everything started and not yet cleared, oldest first.
     @Published public private(set) var jobs: [DownloadJob] = []
@@ -157,10 +184,10 @@ public final class DownloadModel: ObservableObject {
     public let notices = PassthroughSubject<Notice, Never>()
 
     private var host: DropletHost?
-    private var tools: ToolManaging?
-    private var ytDlp: YtDlpRunning?
-    private var transcriber: Transcribing?
-    private var browser: BrowserURLProviding?
+    private var tools: ToolManager?
+    private var ytDlp: YtDlpClient?
+    private var transcriber: SpeechTranscriptionService?
+    private var browser: BrowserURLProvider?
     /// The download lane and the transcription lane: one job each, so a
     /// transcript can run while the next video downloads, and neither can
     /// flood the Mac.
@@ -179,6 +206,8 @@ public final class DownloadModel: ObservableObject {
     private var support = VerdictCache(capacity: 50)
     /// The probe of the URL auto-fill is about to put in the bar.
     private var probeTask: Task<Void, Never>?
+    /// Permission checks and prompts in flight; see `trackPermissionTask`.
+    private var permissionTasks: [UUID: Task<Void, Never>] = [:]
     /// The URL `probeTask` is probing, so a poll of the same tab does not
     /// restart it.
     private var probingKey: String?
@@ -215,6 +244,10 @@ public final class DownloadModel: ObservableObject {
     var fetchDebounce: Duration = .milliseconds(600)
     private var toolTask: Task<Void, Never>?
     private var updateCheckTask: Task<Void, Never>?
+    /// Tools the user sent to Terminal to update, re-checked each time Droppy
+    /// comes back to the front until their update is gone.
+    private var terminalUpdates: Set<ToolLocation.Tool> = []
+    private var activationObserver: NSObjectProtocol?
     /// The video quality the audio-only switch returns to.
     private var lastVideoQuality: DownloadQuality = .best
     /// The same, for the default the Settings switch returns to.
@@ -253,6 +286,8 @@ public final class DownloadModel: ObservableObject {
     }
 
     func stop() {
+        permissionTasks.values.forEach { $0.cancel() }
+        permissionTasks = [:]
         downloadTask?.cancel()
         downloadTask = nil
         transcriptTask?.cancel()
@@ -267,7 +302,10 @@ public final class DownloadModel: ObservableObject {
         installingTools = []
         updateCheckTask?.cancel()
         updateCheckTask = nil
-        isUpdatingTools = false
+        updatingTool = nil
+        isCheckingTools = false
+        installFailures = [:]
+        watchActivation(for: [])
         // Each download the client stops removes its own half-written files
         // once its process has exited.
         ytDlp?.cancelAll()
@@ -566,7 +604,7 @@ public final class DownloadModel: ObservableObject {
         verdict: Bool?
     ) -> AutoFillDecision {
         guard !urlWasTyped, toolsReady else { return .skip }
-        guard BrowserURLProvider.acceptedURL(from: url.absoluteString) != nil else { return .skip }
+        guard Self.webURL(from: url.absoluteString) != nil else { return .skip }
         guard url.absoluteString != currentText.trimmingCharacters(in: .whitespacesAndNewlines) else { return .skip }
         // A page already known to be unsupported is not tried again.
         guard verdict != false else { return .skip }
@@ -802,7 +840,8 @@ public final class DownloadModel: ObservableObject {
             options: options,
             subtitleLanguage: info?.subtitleLanguage(preferring: Self.preferredLanguages)
                 ?? Self.preferredLanguages.first ?? "en",
-            duration: info?.duration
+            duration: info?.duration,
+            folder: folder
         )
         jobs.append(job)
         trimHistory()
@@ -846,13 +885,6 @@ public final class DownloadModel: ObservableObject {
         return jobs.last { $0.url.absoluteString == text }
     }
 
-    /// The jobs behind the queue button: everything except the one already
-    /// shown in the form.
-    public var backgroundJobs: [DownloadJob] {
-        let current = currentJob?.id
-        return jobs.filter { $0.id != current }
-    }
-
     public var summary: QueueSummary { QueueSummary(jobs: jobs) }
 
     public var hasActiveJobs: Bool { jobs.contains(where: \.isActive) }
@@ -875,7 +907,7 @@ public final class DownloadModel: ObservableObject {
         let events = ytDlp.download(
             job.url,
             options: job.options,
-            into: downloadFolder,
+            into: job.folder ?? downloadFolder,
             subtitleLanguage: job.subtitleLanguage
         )
         downloadTask = Task { [weak self] in
@@ -950,7 +982,9 @@ public final class DownloadModel: ObservableObject {
                         duration: duration,
                         ffmpeg: ffmpeg
                     ) { [weak self] event in
-                        guard let self else { return }
+                        // Events hop to the main actor one by one; one landing
+                        // after the transcript ended must not revive the job.
+                        guard let self, self.currentTranscriptID == id else { return }
                         switch event {
                         case .preparing:
                             self.update(id) { $0.state = .preparingTranscript }
@@ -1088,7 +1122,8 @@ public final class DownloadModel: ObservableObject {
         return codes.isEmpty ? ["en"] : codes
     }
 
-    static func webURL(from text: String) -> URL? {
+    /// The URL when `text` is an http or https address with a host.
+    nonisolated static func webURL(from text: String) -> URL? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let url = URL(string: trimmed),
               let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
@@ -1113,93 +1148,202 @@ public final class DownloadModel: ObservableObject {
         guard !missing.isEmpty else { return }
         guard canUseNetwork else {
             let reason = "Allow network access and downloads for Downloady"
-            if missing.contains(.ytDlp) { toolStatus = .failed(reason) }
-            for tool in missing { toolNotices[tool] = reason }
+            toolTask = Task { [weak self] in
+                await self?.finishInstall(of: missing, errors: missing.reduce(into: [:]) { $0[$1] = reason }, tools: tools)
+            }
             return
         }
-        for tool in missing { toolNotices[tool] = nil }
-        toolUpdateMessage = nil
+        for tool in missing {
+            toolNotices[tool] = nil
+            toolUpdateMessages[tool] = nil
+        }
         installingTools = missing
-        let blocksDownloads = missing.contains(.ytDlp)
-        if blocksDownloads { toolStatus = .installing(progress: 0) }
+        if missing.contains(.ytDlp) { toolStatus = .installing(progress: 0) }
         toolTask = Task { [weak self] in
-            var result: ToolStatus
-            var failure: String?
+            var thrown: String?
             do {
-                result = try await tools.installMissing { fraction in
+                _ = try await tools.installMissing { fraction in
                     // Late progress hops must not overwrite the final status.
-                    guard let self, case .installing = self.toolStatus else { return }
+                    // Only a new whole percent redraws the widget, the takeover and Settings.
+                    guard let self, case .installing(let old) = self.toolStatus,
+                          Int(fraction * 100) != Int(old * 100) else { return }
                     self.toolStatus = .installing(progress: fraction)
                 }
             } catch is CancellationError {
                 return
             } catch {
-                failure = error.localizedDescription
-                if blocksDownloads {
-                    result = .failed(error.localizedDescription)
-                } else {
-                    result = await tools.resolve()
-                }
+                thrown = error.localizedDescription
             }
-            let ffmpeg = result.isReady ? result.ffmpeg : await tools.resolveFFmpeg()
-            guard let self, !Task.isCancelled else { return }
-            self.installingTools = []
-            self.detectedFFmpeg = ffmpeg
-            self.toolStatus = result
-            if let failure {
-                for tool in missing { self.toolNotices[tool] = failure }
-            } else if missing.contains(.ffmpeg), ffmpeg?.source != .managed {
-                self.toolNotices[.ffmpeg] = "ffmpeg could not be installed. Try again, or pick another source."
-            }
-            self.toolTask = nil
-            self.checkForYtDlpUpdate()
+            var errors = tools.installErrors
+            // Refused before trying any (network): every tool failed alike.
+            if let thrown, errors.isEmpty { errors = missing.reduce(into: [:]) { $0[$1] = thrown } }
+            await self?.finishInstall(of: missing, errors: errors, tools: tools)
         }
     }
 
-    /// Reinstalls the managed yt-dlp when GitHub has a newer release.
-    public func updateYtDlp() {
+    /// Records which installs failed, then looks the tools up again with
+    /// that known, so a default falls back to its other source.
+    private func finishInstall(
+        of missing: Set<ToolLocation.Tool>,
+        errors: [ToolLocation.Tool: String],
+        tools: ToolManager
+    ) async {
+        for tool in missing { installFailures[tool] = errors[tool] }
+        let status = await tools.resolve()
+        let helpers = await Self.helpers(in: status, from: tools)
+        guard !Task.isCancelled else { return }
+        installingTools = []
+        detectedHelpers = helpers
+        if !status.isReady, let reason = errors[.ytDlp] {
+            toolStatus = .failed(reason)
+        } else {
+            toolStatus = status
+        }
+        for tool in missing {
+            toolNotices[tool] = errors[tool].map { reason in
+                if let location = location(of: tool), location.source != .managed {
+                    return "Using this Mac's \(tool.name): Downloady's copy could not be installed (\(reason))."
+                }
+                return "\(tool.name) could not be installed (\(reason))."
+            }
+        }
+        toolTask = nil
+        checkForUpdates()
+    }
+
+    /// Where `tool` is right now: yt-dlp from the status, the helpers from
+    /// their own lookup.
+    public func location(of tool: ToolLocation.Tool) -> ToolLocation? {
+        tool == .ytDlp ? toolStatus.ytDlp : detectedHelpers[tool]
+    }
+
+    /// Tools left on the default whose two sources both failed: Downloady's
+    /// copy did not install and the Mac has none. Settings puts them on top
+    /// and shows their picker on Custom.
+    public var unavailableTools: [ToolLocation.Tool] {
+        ToolLocation.Tool.allCases.filter {
+            installFailures[$0] != nil && storedSource(for: $0) == nil && location(of: $0) == nil
+        }
+    }
+
+    /// Reinstalls Downloady's copy of `tool` from its latest release.
+    public func updateTool(_ tool: ToolLocation.Tool) {
         guard let tools, toolTask == nil else { return }
         guard canUseNetwork else {
-            toolUpdateMessage = "Allow network access and downloads for Downloady"
+            toolUpdateMessages[tool] = "Allow network access and downloads for Downloady"
             return
         }
-        let before = toolStatus.ytDlp?.version
-        isUpdatingTools = true
-        toolUpdateMessage = nil
+        let target = toolUpdates[tool]?.version
+        updatingTool = tool
+        toolUpdateMessages[tool] = nil
         toolTask = Task { [weak self] in
-            var message: String?
+            var message: String
             var result: ToolStatus?
             do {
-                let status = try await tools.updateYtDlp()
-                result = status
-                let after = status.ytDlp?.version
-                message = after == before ? "Up to date" : "Updated to \(after ?? "the latest release")"
+                result = try await tools.update(tool)
+                message = "Updated to \(target ?? "the latest release")"
             } catch is CancellationError {
                 return
             } catch {
                 message = error.localizedDescription
             }
+            let helpers = await Self.helpers(in: result ?? .unknown, from: tools)
             guard let self, !Task.isCancelled else { return }
             if let result {
                 self.toolStatus = result
-                self.ytDlpUpdate = nil
+                self.detectedHelpers = helpers
+                self.toolUpdates[tool] = nil
+                self.upToDateTools.insert(tool)
             }
-            self.toolUpdateMessage = message
-            self.isUpdatingTools = false
+            self.toolUpdateMessages[tool] = message
+            self.updatingTool = nil
             self.toolTask = nil
         }
     }
 
-    /// Asks GitHub whether the managed yt-dlp has a newer release, without
-    /// installing it. Quiet: a failed check just offers no update.
-    public func checkForYtDlpUpdate() {
-        guard let tools, canUseNetwork, updateCheckTask == nil, !isUpdatingTools,
-              toolStatus.ytDlp?.source == .managed else { return }
+    /// Asks where each tool in use comes from whether a newer release is
+    /// out, without installing anything. Quiet: a failed check offers no
+    /// update.
+    public func checkForUpdates() {
+        guard let tools, canUseNetwork, updatingTool == nil else {
+            isCheckingTools = false
+            return
+        }
+        updateCheckTask?.cancel()
+        isCheckingTools = true
         updateCheckTask = Task { [weak self] in
-            let tag = try? await tools.availableYtDlpUpdate()
+            var found: [ToolLocation.Tool: ToolUpdate] = [:]
+            var current: Set<ToolLocation.Tool> = []
+            for tool in ToolLocation.Tool.allCases {
+                do {
+                    if let update = try await tools.availableUpdate(for: tool) {
+                        found[tool] = update
+                    } else {
+                        current.insert(tool)
+                    }
+                } catch {}
+            }
             guard let self, !Task.isCancelled else { return }
-            self.ytDlpUpdate = tag
+            self.toolUpdates = found
+            self.upToDateTools = current
+            self.isCheckingTools = false
             self.updateCheckTask = nil
+            self.watchActivation(for: self.terminalUpdates.filter { found[$0] != nil })
+        }
+    }
+
+    /// Looks the versions and the newer releases up again: Settings opened,
+    /// or Droppy came back after an update in Terminal.
+    public func refreshTools() {
+        guard toolTask == nil else { return }
+        isCheckingTools = true
+        reloadTools()
+    }
+
+    /// Re-checks when Droppy becomes active while `tools` wait on an update
+    /// the user runs in Terminal; an empty set stops watching.
+    private func watchActivation(for tools: Set<ToolLocation.Tool>) {
+        terminalUpdates = tools
+        if tools.isEmpty, let observer = activationObserver {
+            NotificationCenter.default.removeObserver(observer)
+            activationObserver = nil
+        } else if !tools.isEmpty, activationObserver == nil {
+            activationObserver = NotificationCenter.default.addObserver(
+                forName: NSApplication.didBecomeActiveNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.refreshTools() }
+            }
+        }
+    }
+
+    /// Copies the command that updates the Mac's copy of `tool`.
+    public func copyUpdateCommand(for tool: ToolLocation.Tool) {
+        guard let command = toolUpdates[tool]?.command else { return }
+        if host?.workspace.copyToPasteboard(command) == true {
+            toolUpdateMessages[tool] = "Copied"
+        }
+    }
+
+    /// Opens Terminal on a script that runs the update command, so the user
+    /// sees it run and answers any password prompt there.
+    public func runUpdateCommand(for tool: ToolLocation.Tool) {
+        guard let host, let command = toolUpdates[tool]?.command else { return }
+        let script = host.environment.containerDirectory.appendingPathComponent("Update \(tool.name).command")
+        // A login shell, so Homebrew's `PATH` is set as in the user's own Terminal.
+        let body = "#!/bin/zsh -l\necho '$ \(command)'\n\(command)\n"
+        do {
+            try body.write(to: script, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+        } catch {
+            toolUpdateMessages[tool] = "Could not prepare the command: \(error.localizedDescription)"
+            return
+        }
+        if host.workspace.open(script) {
+            watchActivation(for: terminalUpdates.union([tool]))
+        } else {
+            toolUpdateMessages[tool] = "Terminal could not be opened. Copy the command instead."
         }
     }
 
@@ -1210,22 +1354,39 @@ public final class DownloadModel: ObservableObject {
         guard let tools else { return }
         toolTask?.cancel()
         installingTools = []
-        isUpdatingTools = false
+        updatingTool = nil
         toolTask = Task { [weak self] in
             let status = await tools.resolve()
-            let ffmpeg = status.isReady ? status.ffmpeg : await tools.resolveFFmpeg()
+            let helpers = await Self.helpers(in: status, from: tools)
             guard let self, !Task.isCancelled else { return }
-            self.detectedFFmpeg = ffmpeg
+            self.detectedHelpers = helpers
             self.toolStatus = status
             self.toolTask = nil
-            if tools.missingManagedTools().isEmpty {
-                self.checkForYtDlpUpdate()
+            // A copy that failed this session waits for Try again.
+            if tools.missingManagedTools().subtracting(self.installFailures.keys).isEmpty {
+                self.checkForUpdates()
             } else {
                 // First run, or a source just switched to Downloady's copy:
                 // fetch it now rather than wait for a click.
                 self.installTools()
+                // Refused (no network): end the check here instead.
+                if self.toolTask == nil { self.checkForUpdates() }
             }
         }
+    }
+
+    /// ffmpeg and Deno from a ready status.
+    private static func helpers(in status: ToolStatus) -> [ToolLocation.Tool: ToolLocation] {
+        [.ffmpeg: status.ffmpeg, .deno: status.deno].compactMapValues { $0 }
+    }
+
+    /// ffmpeg and Deno from `status` when it is ready, otherwise looked up
+    /// on their own.
+    private static func helpers(in status: ToolStatus, from tools: ToolManager) async -> [ToolLocation.Tool: ToolLocation] {
+        if status.isReady { return helpers(in: status) }
+        var found: [ToolLocation.Tool: ToolLocation] = [:]
+        for tool in [ToolLocation.Tool.ffmpeg, .deno] { found[tool] = await tools.resolveHelper(tool) }
+        return found
     }
 
     private var canUseNetwork: Bool {
@@ -1347,11 +1508,11 @@ public final class DownloadModel: ObservableObject {
     /// browser. A browser that is not running keeps what was last recorded.
     public func refreshBrowserPermissions() {
         guard appleEventsGranted else { return }
-        Task { [weak self] in
+        trackPermissionTask { [weak self] in
             var toAsk: [SupportedBrowser] = []
             for browser in SupportedBrowser.all {
                 let status = await BrowserAutomation.status(of: browser, ask: false)
-                guard let self else { return }
+                guard let self, !Task.isCancelled else { return }
                 if status == .notAsked { toAsk.append(browser) }
                 self.record(status, for: browser)
             }
@@ -1364,10 +1525,11 @@ public final class DownloadModel: ObservableObject {
     public func askBrowsers() {
         guard appleEventsGranted else { return }
         let browsers = browsersToAsk
-        Task { [weak self] in
+        trackPermissionTask { [weak self] in
             for browser in browsers {
+                guard !Task.isCancelled else { return }
                 let status = await BrowserAutomation.status(of: browser, ask: true)
-                guard let self else { return }
+                guard let self, !Task.isCancelled else { return }
                 self.record(status, for: browser)
                 self.browsersToAsk.removeAll { $0 == browser }
             }
@@ -1392,25 +1554,12 @@ public final class DownloadModel: ObservableObject {
         host?.permissions.openSystemSettings(for: .appleEvents)
     }
 
-    public var customYtDlpPath: String? {
-        get { host?.preferences.value(forKey: PreferenceKey.customYtDlpPath, as: String.self) }
-        set { setCustomPath(newValue, forKey: PreferenceKey.customYtDlpPath) }
-    }
-
-    public var customFFmpegPath: String? {
-        get { host?.preferences.value(forKey: PreferenceKey.customFFmpegPath, as: String.self) }
-        set { setCustomPath(newValue, forKey: PreferenceKey.customFFmpegPath) }
-    }
-
     func customPath(for tool: ToolLocation.Tool) -> String? {
-        tool == .ytDlp ? customYtDlpPath : customFFmpegPath
+        host?.preferences.value(forKey: PreferenceKey.customPath(for: tool), as: String.self)
     }
 
     func setCustomPath(_ path: String?, for tool: ToolLocation.Tool) {
-        if tool == .ytDlp { customYtDlpPath = path } else { customFFmpegPath = path }
-    }
-
-    private func setCustomPath(_ path: String?, forKey key: String) {
+        let key = PreferenceKey.customPath(for: tool)
         let trimmed = path?.trimmingCharacters(in: .whitespacesAndNewlines)
         let value = trimmed?.isEmpty == false ? trimmed : nil
         guard value != host?.preferences.value(forKey: key, as: String.self) else { return }
@@ -1420,8 +1569,7 @@ public final class DownloadModel: ObservableObject {
     }
 
     private func storedSource(for tool: ToolLocation.Tool) -> ToolLocation.Source? {
-        let key = tool == .ytDlp ? PreferenceKey.ytDlpSource : PreferenceKey.ffmpegSource
-        if let raw = host?.preferences.value(forKey: key, as: String.self) {
+        if let raw = host?.preferences.value(forKey: PreferenceKey.source(for: tool), as: String.self) {
             return ToolLocation.Source(rawValue: raw)
         }
         // Before the source picker, a custom path alone meant "use it".
@@ -1430,22 +1578,32 @@ public final class DownloadModel: ObservableObject {
 
     /// What the tool manager looks up.
     var toolChoices: ToolChoices {
-        ToolChoices(
-            ytDlpSource: storedSource(for: .ytDlp) ?? .managed,
-            ffmpegSource: storedSource(for: .ffmpeg),
-            ytDlpPath: customYtDlpPath,
-            ffmpegPath: customFFmpegPath
+        let tools = ToolLocation.Tool.allCases
+        return ToolChoices(
+            sources: Dictionary(uniqueKeysWithValues: tools.compactMap { tool in storedSource(for: tool).map { (tool, $0) } }),
+            paths: Dictionary(uniqueKeysWithValues: tools.compactMap { tool in customPath(for: tool).map { (tool, $0) } }),
+            failedInstalls: Set(installFailures.keys)
         )
     }
 
     /// The segment Settings' picker shows for `tool`: the stored choice, or
-    /// for ffmpeg's default, the source it resolved to.
+    /// for the default, the source it resolved to; Custom when neither source
+    /// could provide it, so the path field is right there.
     public func source(for tool: ToolLocation.Tool) -> ToolLocation.Source {
         if let stored = storedSource(for: tool) { return stored }
-        switch tool {
-        case .ytDlp: return .managed
-        case .ffmpeg: return tools?.systemCopy(of: .ffmpeg) != nil ? .system : .managed
-        }
+        if unavailableTools.contains(tool) { return .custom }
+        return tools?.effectiveSource(of: tool) ?? tool.preferredSource
+    }
+
+    /// The user picked a file for a tool neither source could provide.
+    public func chooseCustomPath(_ path: String, for tool: ToolLocation.Tool) {
+        guard let host else { return }
+        host.preferences.setValue(ToolLocation.Source.custom.rawValue, forKey: PreferenceKey.source(for: tool))
+        host.preferences.setValue(path, forKey: PreferenceKey.customPath(for: tool))
+        installFailures[tool] = nil
+        toolNotices[tool] = nil
+        objectWillChange.send()
+        reloadTools()
     }
 
     /// The copy of `tool` on this Mac, for Settings' This Mac segment.
@@ -1459,14 +1617,16 @@ public final class DownloadModel: ObservableObject {
         guard let host else { return }
         var chosen = source
         toolNotices[tool] = nil
+        // A picked source is strict; picking Downloady's copy retries it.
+        installFailures[tool] = nil
         if source == .system, systemCopy(of: tool) == nil {
             chosen = .custom
             toolNotices[tool] = "No \(tool.name) was found on this Mac. Enter the path to yours below."
         }
-        let key = tool == .ytDlp ? PreferenceKey.ytDlpSource : PreferenceKey.ffmpegSource
-        host.preferences.setValue(chosen.rawValue, forKey: key)
+        host.preferences.setValue(chosen.rawValue, forKey: PreferenceKey.source(for: tool))
         objectWillChange.send()
-        if tool == .ytDlp { ytDlpUpdate = nil }
+        toolUpdates[tool] = nil
+        upToDateTools.remove(tool)
         reloadTools()
     }
 
@@ -1513,8 +1673,8 @@ public final class DownloadModel: ObservableObject {
         if speechStatus == .denied {
             return "Speech recognition is not allowed for Droppy. Grant it to transcribe."
         }
-        if detectedFFmpeg == nil {
-            return "Transcribing needs ffmpeg, which is set up under Tools."
+        if detectedHelpers[.ffmpeg] == nil {
+            return "Transcribing needs ffmpeg, which is set up under Providers."
         }
         return nil
     }
@@ -1543,13 +1703,23 @@ public final class DownloadModel: ObservableObject {
     /// place left to change it, so that is where the button then leads.
     public func grantSpeechRecognition() {
         guard let host, host.isGranted(.speechRecognition) else { return }
-        Task { [weak self] in
+        trackPermissionTask { [weak self] in
             let status = await host.permissions.request(.speechRecognition)
-            guard let self else { return }
+            guard let self, !Task.isCancelled else { return }
             self.refreshSpeechStatus()
             if status == .denied {
-                host.permissions.openSystemSettings(for: .speechRecognition)
+                self.host?.permissions.openSystemSettings(for: .speechRecognition)
             }
+        }
+    }
+
+    /// Runs a permission check or prompt as a task `stop()` cancels, so a
+    /// deactivated droplet puts up no prompt and calls no host.
+    private func trackPermissionTask(_ work: @escaping @MainActor () async -> Void) {
+        let id = UUID()
+        permissionTasks[id] = Task { [weak self] in
+            await work()
+            self?.permissionTasks[id] = nil
         }
     }
 

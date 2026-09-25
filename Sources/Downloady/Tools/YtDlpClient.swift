@@ -39,45 +39,6 @@ public enum YtDlpError: Error, Equatable, Sendable, LocalizedError {
     }
 }
 
-@MainActor
-public protocol YtDlpRunning: AnyObject {
-    /// `yt-dlp -J --no-playlist --skip-download <url>`, decoded.
-    func fetchInfo(for url: URL) async throws -> MediaInfo
-
-    /// Whether one of yt-dlp's dedicated extractors claims `url`, without
-    /// touching the network (`YtDlpCommand.supportProbe`). About half a
-    /// second. `false` when yt-dlp is not ready or the task is cancelled.
-    func isSupported(_ url: URL) async -> Bool
-
-    /// `yt-dlp --list-extractors`, offline. `nil` when yt-dlp is not ready
-    /// or fails.
-    func listExtractors() async -> String?
-
-    /// Downloads `url` into `folder`. `subtitleLanguage` is the track
-    /// yt-dlp is asked for when the options want subtitles. Cancelling the
-    /// consuming task terminates the process.
-    func download(
-        _ url: URL,
-        options: DownloadOptions,
-        into folder: URL,
-        subtitleLanguage: String
-    ) -> AsyncThrowingStream<DownloadEvent, Error>
-
-    /// Terminates every child process. Called from `deactivate()`.
-    func cancelAll()
-}
-
-public extension YtDlpRunning {
-    /// A download with no subtitles to pick a language for.
-    func download(
-        _ url: URL,
-        options: DownloadOptions,
-        into folder: URL
-    ) -> AsyncThrowingStream<DownloadEvent, Error> {
-        download(url, options: options, into: folder, subtitleLanguage: "en")
-    }
-}
-
 // MARK: - Arguments and output lines
 
 /// The command lines, and what a line of download output means. Pure, so the
@@ -105,16 +66,21 @@ public enum YtDlpCommand {
 
     /// `--ignore-config`: a yt-dlp config file of the user's own (`--quiet`,
     /// `-o`, `--print`…) would change the output this runner reads.
-    static func common(ffmpeg: URL?) -> [String] {
+    /// `--js-runtimes`: yt-dlp only looks for Deno on `PATH`, which is short
+    /// when Droppy starts from Finder; without it YouTube loses formats.
+    static func common(ffmpeg: URL?, deno: URL? = nil) -> [String] {
         var args = ["--ignore-config", "--no-playlist", "--newline", "--no-colors"]
         if let ffmpeg {
             args += ["--ffmpeg-location", ffmpeg.path]
         }
+        if let deno {
+            args += ["--js-runtimes", "deno:\(deno.path)"]
+        }
         return args
     }
 
-    public static func fetchInfo(_ url: URL, ffmpeg: URL?) -> [String] {
-        common(ffmpeg: ffmpeg) + ["-J", "--skip-download", "--", url.absoluteString]
+    public static func fetchInfo(_ url: URL, ffmpeg: URL?, deno: URL? = nil) -> [String] {
+        common(ffmpeg: ffmpeg, deno: deno) + ["-J", "--skip-download", "--", url.absoluteString]
     }
 
     /// The compatibility probe: every extractor except the generic one, and
@@ -145,9 +111,10 @@ public enum YtDlpCommand {
         options: DownloadOptions,
         folder: URL,
         ffmpeg: URL?,
+        deno: URL? = nil,
         subtitleLanguage: String = "en"
     ) -> [String] {
-        common(ffmpeg: ffmpeg)
+        common(ffmpeg: ffmpeg, deno: deno)
             + options.ytDlpArguments
             + options.subtitleArguments(language: subtitleLanguage)
             + [
@@ -337,7 +304,9 @@ final class ChildProcess: @unchecked Sendable {
         let first = !terminationRequested
         terminationRequested = true
         lock.unlock()
-        guard first, process.processIdentifier > 0 else { return }
+        // Not started yet: `start` kills it once `run()` returns. Exited: its
+        // PID may belong to another process by now.
+        guard first, process.isRunning else { return }
         signalTree(SIGTERM)
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) { [self] in
             if process.isRunning { signalTree(SIGKILL) }
@@ -378,13 +347,11 @@ final class ChildProcess: @unchecked Sendable {
 
 // MARK: - Client
 
-/// The real implementation.
-///
 /// Every process is kept in `running` so `cancelAll()` can terminate it. Pipes
 /// are read off the main actor; events are delivered through the stream,
 /// which the model consumes on the main actor.
 @MainActor
-public final class YtDlpClient: YtDlpRunning {
+public final class YtDlpClient {
     private let tools: @MainActor () -> ToolStatus
     private let log: @MainActor (String) -> Void
     private var running: [ObjectIdentifier: ChildProcess] = [:]
@@ -394,8 +361,9 @@ public final class YtDlpClient: YtDlpRunning {
         self.log = log
     }
 
+    /// `yt-dlp -J --no-playlist --skip-download <url>`, decoded.
     public func fetchInfo(for url: URL) async throws -> MediaInfo {
-        let (exit, data) = try await runToEnd(YtDlpCommand.fetchInfo(url, ffmpeg: tools().ffmpeg?.url))
+        let (exit, data) = try await runToEnd(YtDlpCommand.fetchInfo(url, ffmpeg: tools().ffmpeg?.url, deno: tools().deno?.url))
         guard exit.status == 0 else {
             if YtDlpCommand.isUnsupported(stderr: exit.stderr) { throw YtDlpError.unsupportedURL }
             let message = YtDlpCommand.errorMessage(fromStderr: exit.stderr)
@@ -409,6 +377,9 @@ public final class YtDlpClient: YtDlpRunning {
         return info
     }
 
+    /// Whether one of yt-dlp's dedicated extractors claims `url`, without
+    /// touching the network (`YtDlpCommand.supportProbe`). About half a
+    /// second. `false` when yt-dlp is not ready or the task is cancelled.
     public func isSupported(_ url: URL) async -> Bool {
         guard let exit = try? await runToEnd(YtDlpCommand.supportProbe(url)).0 else { return false }
         let supported = YtDlpCommand.probeSaysSupported(status: exit.status, stderr: exit.stderr)
@@ -416,6 +387,8 @@ public final class YtDlpClient: YtDlpRunning {
         return supported
     }
 
+    /// `yt-dlp --list-extractors`, offline. `nil` when yt-dlp is not ready
+    /// or fails.
     public func listExtractors() async -> String? {
         guard let result = try? await runToEnd(["--ignore-config", "--list-extractors"]), result.0.status == 0 else { return nil }
         return String(decoding: result.1, as: UTF8.self)
@@ -445,11 +418,14 @@ public final class YtDlpClient: YtDlpRunning {
         try JSONDecoder().decode(MediaInfo.self, from: data)
     }
 
+    /// Downloads `url` into `folder`. `subtitleLanguage` is the track
+    /// yt-dlp is asked for when the options want subtitles. Cancelling the
+    /// consuming task terminates the process.
     public func download(
         _ url: URL,
         options: DownloadOptions,
         into folder: URL,
-        subtitleLanguage: String
+        subtitleLanguage: String = "en"
     ) -> AsyncThrowingStream<DownloadEvent, Error> {
         guard let ytDlp = tools().ytDlp else {
             return AsyncThrowingStream { $0.finish(throwing: YtDlpError.toolsNotReady) }
@@ -459,6 +435,7 @@ public final class YtDlpClient: YtDlpRunning {
             options: options,
             folder: folder,
             ffmpeg: tools().ffmpeg?.url,
+            deno: tools().deno?.url,
             subtitleLanguage: subtitleLanguage
         )
         let child = ChildProcess(executable: ytDlp.url, arguments: arguments)
@@ -520,6 +497,7 @@ public final class YtDlpClient: YtDlpRunning {
         }
     }
 
+    /// Terminates every child process. Called from `deactivate()`.
     public func cancelAll() {
         for child in running.values { child.terminate() }
         running.removeAll()
