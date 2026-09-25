@@ -288,9 +288,9 @@ extension DownloadyDroplet: HUDPresenting {
     /// Tells the user a download ended while they were looking elsewhere.
     ///
     /// The strip is the at-rest form, "Downloaded" and the file name. It grows
-    /// into the card a beat later, the way Droppy's own battery HUD does, so
-    /// Show in Finder is in reach; growing is one re-present with the same id,
-    /// never a second HUD.
+    /// into the card a beat later, the way Droppy's own battery HUD does, where
+    /// the name has room; growing is one re-present with the same id, never a
+    /// second HUD.
     private func presentCompletionHUD(title: String, file: URL) {
         guard let host else { return }
         // Nothing to announce while the user is already looking at the shelf.
@@ -333,8 +333,8 @@ extension DownloadyDroplet: HUDPresenting {
                 .frame(maxWidth: .infinity)
                 .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
             },
-            expanded: { [weak self] in
-                DownloadedHUDCard(title: title, name: name) { self?.model.reveal(file) }
+            expanded: {
+                DownloadedHUDCard(title: title, name: name)
             }
         )
         _ = host.hud.present(request)

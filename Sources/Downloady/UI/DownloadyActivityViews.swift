@@ -82,30 +82,22 @@ struct DownloadActivityValue: View {
     private var stage: String { label.filter { !$0.isNumber } }
 }
 
-/// The card the completion HUD grows into: what landed, and where to see it.
+/// The card the completion HUD grows into: what landed. No controls: Droppy
+/// lets clicks fall through a HUD card, so Show in Finder is on the shelf.
 struct DownloadedHUDCard: View {
     let title: String
     let name: String
-    let reveal: () -> Void
 
     var body: some View {
-        HStack(spacing: DroppySpacing.sm) {
-            VStack(alignment: .leading, spacing: DroppySpacing.xs) {
-                Text(title)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
-                Text(name)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            Spacer(minLength: 0)
-            Button("Show in Finder", action: reveal)
-                .buttonStyle(DroppyQuietButtonStyle(size: .small))
-                // The island's card is 208pt wide: the name gives way, the
-                // button never truncates its own label.
-                .fixedSize()
+        VStack(alignment: .leading, spacing: DroppySpacing.xs) {
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+            Text(name)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
+                .lineLimit(1)
+                .truncationMode(.middle)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }

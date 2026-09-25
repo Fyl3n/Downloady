@@ -46,6 +46,7 @@ public enum YtDlpError: Error, Equatable, Sendable, LocalizedError {
 public enum YtDlpCommand {
     public static let progressTemplate =
         "download:downloady %(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s"
+            + "|%(progress.fragment_index)s|%(progress.fragment_count)s"
     public static let outputTemplate = "%(title).200B [%(id)s].%(ext)s"
 
     /// The line yt-dlp prints before it writes a stream.
@@ -187,6 +188,15 @@ public enum YtDlpCommand {
         }
         var seen = Set<URL>()
         return files.filter { seen.insert($0).inserted }
+    }
+
+    /// Whether a name in `folder` is a fragment of an announced file:
+    /// `<announced>.part-Frag<n>`, with or without its own `.part`.
+    static func isFragment(of announced: [URL], in folder: URL) -> (String) -> Bool {
+        let prefixes = announced
+            .filter { $0.deletingLastPathComponent().path == folder.path }
+            .map { $0.lastPathComponent + ".part-Frag" }
+        return { name in prefixes.contains(where: name.hasPrefix) }
     }
 
     /// The line worth showing from yt-dlp's stderr: the last `ERROR:` line,
@@ -491,9 +501,17 @@ public final class YtDlpClient {
     }
 
     /// Deletes what a stopped or failed download left in the folder.
+    /// A fragmented stream also leaves the fragment it was writing,
+    /// `<name>.part-Frag<n>.part`, whose number no line announces.
     nonisolated static func removeLeftovers(of announced: [URL]) {
-        for file in YtDlpCommand.leftovers(of: announced) {
-            try? FileManager.default.removeItem(at: file)
+        let fm = FileManager.default
+        var files = YtDlpCommand.leftovers(of: announced)
+        for folder in Set(announced.map { $0.deletingLastPathComponent() }) {
+            let names = (try? fm.contentsOfDirectory(atPath: folder.path)) ?? []
+            files += names.filter(YtDlpCommand.isFragment(of: announced, in: folder)).map { folder.appendingPathComponent($0) }
+        }
+        for file in files {
+            try? fm.removeItem(at: file)
         }
     }
 
@@ -527,8 +545,12 @@ public final class YtDlpClient {
 
 /// Turns one `--progress-template` line into an event.
 ///
-/// Input looks like `downloady  42.3%|  3.10MiB/s|00:12`; any other line gives
-/// `nil`. yt-dlp writes `NA` (or `Unknown`) for a field it does not know.
+/// Input looks like `downloady  42.3%|  3.10MiB/s|00:12|NA|NA`; any other line
+/// gives `nil`. yt-dlp writes `NA` (or `Unknown`) for a field it does not know.
+///
+/// A fragmented stream (HLS, DASH) reports its fragment index and count, and
+/// the fraction comes from those: yt-dlp's percentage there is bytes over a
+/// total it re-estimates from each fragment's size, so it steps backwards.
 public enum ProgressParser {
     public static let prefix = "downloady "
 
@@ -537,18 +559,24 @@ public enum ProgressParser {
         let fields = line.dropFirst(prefix.count)
             .split(separator: "|", omittingEmptySubsequences: false)
             .map { $0.trimmingCharacters(in: .whitespaces) }
-        guard fields.count == 3 else { return nil }
-        let percentText = fields[0].hasSuffix("%") ? String(fields[0].dropLast()) : fields[0]
-        guard let percent = Double(percentText.trimmingCharacters(in: .whitespaces)) else { return nil }
+        guard fields.count == 3 || fields.count == 5 else { return nil }
+        let fraction: Double
+        if fields.count == 5, let index = Double(fields[3]), let count = Double(fields[4]), count > 0 {
+            fraction = index / count
+        } else {
+            let percentText = fields[0].hasSuffix("%") ? String(fields[0].dropLast()) : fields[0]
+            guard let percent = Double(percentText.trimmingCharacters(in: .whitespaces)) else { return nil }
+            fraction = percent / 100
+        }
         return .progress(
-            fraction: min(max(percent / 100, 0), 1),
+            fraction: min(max(fraction, 0), 1),
             speed: known(fields[1]),
             eta: known(fields[2])
         )
     }
 
     private static func known(_ field: String) -> String? {
-        let unknown: Set<String> = ["", "NA", "N/A", "Unknown", "Unknown speed", "Unknown ETA"]
+        let unknown: Set<String> = ["", "NA", "N/A", "Unknown", "Unknown speed", "Unknown B/s", "Unknown ETA"]
         return unknown.contains(field) ? nil : field
     }
 }

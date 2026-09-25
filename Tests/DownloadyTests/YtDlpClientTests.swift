@@ -16,6 +16,17 @@ import Testing
         #expect(ProgressParser.parse("downloady NA|NA|NA") == nil)
     }
 
+    @Test func aFragmentedStreamCountsFragments() {
+        // The percentage is yt-dlp's estimate and goes backwards; the
+        // fragment count does not.
+        #expect(ProgressParser.parse("downloady 100.0%|2.01KiB/s|Unknown|0|123")
+            == .progress(fraction: 0, speed: "2.01KiB/s", eta: nil))
+        #expect(ProgressParser.parse("downloady   2.8%|14.34MiB/s|00:58|5|123")
+            == .progress(fraction: 5.0 / 123, speed: "14.34MiB/s", eta: "00:58"))
+        #expect(ProgressParser.parse("downloady  42.3%|3.10MiB/s|00:12|NA|NA")
+            == .progress(fraction: 0.423, speed: "3.10MiB/s", eta: "00:12"))
+    }
+
     @Test func ignoresOtherLines() {
         #expect(ProgressParser.parse("[download] Destination: /tmp/a.webm") == nil)
         #expect(ProgressParser.parse("downloady") == nil)
@@ -96,6 +107,15 @@ import Testing
             "/tmp/a [id].temp.mkv",
         ])
         #expect(YtDlpCommand.leftovers(of: []).isEmpty)
+    }
+
+    @Test func fragmentsOfAnnouncedFilesAreLeftovers() {
+        let folder = URL(fileURLWithPath: "/tmp")
+        let isFragment = YtDlpCommand.isFragment(of: [URL(fileURLWithPath: "/tmp/a [id].mp4")], in: folder)
+        #expect(isFragment("a [id].mp4.part-Frag38.part"))
+        #expect(isFragment("a [id].mp4.part-Frag38"))
+        #expect(!isFragment("a [id].mp4.part"))
+        #expect(!isFragment("b [id].mp4.part-Frag1.part"))
     }
 
     @Test func picksTheErrorLine() {
