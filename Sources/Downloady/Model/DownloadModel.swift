@@ -19,7 +19,7 @@ public enum PreferenceKey {
     public static let options = "options"
     public static let downloadFolder = "downloadFolder"
     public static let autoFillFromBrowser = "autoFillFromBrowser"
-    /// `BackgroundTabCheck` raw value. Unset: `.always`.
+    /// `BackgroundTabCheck` raw value. Unset: `.whenWidgetOnShelf`.
     public static let backgroundTabCheck = "backgroundTabCheck"
     /// `[bundle ID: allowed]`, what macOS last said about each browser.
     public static let browserPermissions = "browserPermissions"
@@ -1587,7 +1587,7 @@ public final class DownloadModel: ObservableObject {
     public var backgroundTabCheck: BackgroundTabCheck {
         get {
             host?.preferences.value(forKey: PreferenceKey.backgroundTabCheck, as: String.self)
-                .flatMap(BackgroundTabCheck.init(rawValue:)) ?? .always
+                .flatMap(BackgroundTabCheck.init(rawValue:)) ?? .whenWidgetOnShelf
         }
         set {
             host?.preferences.setValue(newValue.rawValue, forKey: PreferenceKey.backgroundTabCheck)
