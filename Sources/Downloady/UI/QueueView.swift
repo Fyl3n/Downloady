@@ -83,6 +83,7 @@ struct QueueView: View {
         .padding(DroppySpacing.lg)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .animation(DroppyAnimation.state, value: model.jobs)
+        .onAppear { model.checkFiles() }
     }
 }
 
@@ -188,7 +189,22 @@ struct JobStatusText: View {
         case .scheduled:
             TimelineView(.everyMinute) { _ in Text(job.statusText) }
         default:
-            Text(job.statusText)
+            if let segments = job.statusSegments {
+                // The words give way first; the percentage always shows.
+                HStack(spacing: 0) {
+                    if !segments.head.isEmpty {
+                        Text(segments.head).layoutPriority(-1)
+                        Text(" · ")
+                    }
+                    Text(segments.percent)
+                    if !segments.tail.isEmpty {
+                        Text(" · ")
+                        Text(segments.tail).layoutPriority(-1)
+                    }
+                }
+            } else {
+                Text(job.statusText)
+            }
         }
     }
 }

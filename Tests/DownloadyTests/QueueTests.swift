@@ -21,6 +21,29 @@ import Testing
         )
     }
 
+    /// A narrow row cuts the words around the percentage, never the number.
+    @Test func theStatusLineSplitsAroundItsPercentage() {
+        let transcribing = job(.transcribing(fraction: 0.42)).statusSegments
+        #expect(transcribing?.head == "Transcribing")
+        #expect(transcribing?.percent.hasSuffix("%") == true)
+        #expect(transcribing?.tail == "")
+        let downloading = job(.downloading(fraction: 0.1, speed: "2 MB/s", eta: "1:00")).statusSegments
+        #expect(downloading?.head == "")
+        #expect(downloading?.tail == "2 MB/s · 1:00 left")
+        #expect(job(.waiting).statusSegments == nil)
+    }
+
+    /// Only a finished Job whose file is gone loses it.
+    @Test func aFinishedJobLosesAFileThatIsGone() {
+        var finished = job(.finished)
+        finished.file = URL(fileURLWithPath: "/nowhere/a.mp4")
+        #expect(finished.hasLostFile(exists: { _ in false }))
+        #expect(!finished.hasLostFile(exists: { _ in true }))
+        var running = finished
+        running.state = .postProcessing
+        #expect(!running.hasLostFile(exists: { _ in false }))
+    }
+
     @Test func theDownloadLaneTakesOneJobAtATime() {
         #expect([job(.waiting), job(.waiting)].nextToDownload?.title == "A")
         let running = [job(.downloading(fraction: 0.2, speed: nil, eta: nil)), job(.waiting, title: "B")]

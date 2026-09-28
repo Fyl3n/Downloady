@@ -46,6 +46,12 @@ public final class DownloadyDroplet: NSObject, ObservableObject, Droplet {
     private var hudFile: URL?
     /// Whether the queue was opened from the takeover, so Back goes there.
     private var queueReturnsToDetail = false
+    /// Watches the shelf open, to send a click on the live activity to the takeover.
+    private var shelfObserver: AnyCancellable?
+    private var shelfWasExpanded = false
+    /// Whether the live activity is on the notch, and when it last left it.
+    private var activityIsOnNotch = false
+    private var activityLeftNotchAt = Date.distantPast
 
     public func activate(host: DropletHost) throws {
         self.host = host
@@ -60,6 +66,10 @@ public final class DownloadyDroplet: NSObject, ObservableObject, Droplet {
         noticeObserver = model.notices.sink { [weak self] notice in
             self?.present(notice)
         }
+        shelfWasExpanded = host.shelf.isExpanded
+        shelfObserver = host.shelf.didChange.sink { [weak self] in
+            self?.shelfDidChange()
+        }
         registerQuickActions(host: host)
         host.log.info("Downloady activated")
     }
@@ -71,6 +81,9 @@ public final class DownloadyDroplet: NSObject, ObservableObject, Droplet {
         queueObserver = nil
         noticeObserver?.cancel()
         noticeObserver = nil
+        shelfObserver?.cancel()
+        shelfObserver = nil
+        activityIsOnNotch = false
         hudTask?.cancel()
         hudTask = nil
         if hudFile != nil {
@@ -371,6 +384,23 @@ extension DownloadyDroplet: LiveActivityProviding {
 
     public func liveActivitySeatDidChange(_ seat: DropletLiveActivitySeat) {
         host?.log.debug("live activity seat: \(seat)")
+        let isOnNotch = seat == .compact
+        if activityIsOnNotch, !isOnNotch { activityLeftNotchAt = Date() }
+        activityIsOnNotch = isOnNotch
+    }
+
+    /// Droppy opens the shelf when the row is clicked or hovered and tells a
+    /// droplet neither, so a shelf that opens while the row is on the notch
+    /// (or left it that instant: the opening shelf suppresses it) opened from
+    /// the row, and goes on to the takeover.
+    private func shelfDidChange() {
+        guard let host else { return }
+        let isExpanded = host.shelf.isExpanded
+        defer { shelfWasExpanded = isExpanded }
+        guard isExpanded, !shelfWasExpanded, model.hasActiveJobs,
+              activityIsOnNotch || Date().timeIntervalSince(activityLeftNotchAt) < 1
+        else { return }
+        openDetail()
     }
 
     public func makeCompactLeading() -> AnyView {
@@ -381,8 +411,8 @@ extension DownloadyDroplet: LiveActivityProviding {
         AnyView(DownloadActivityValue(model: model))
     }
 
-    /// Droppy mounts no card for a droplet's activity: hovering the row opens
-    /// the shelf, where the widget and its Cancel button are.
+    /// Droppy mounts no card for a droplet's activity: opening the shelf from
+    /// the row presents the takeover instead (see `shelfDidChange`).
     public func makeExpanded(context: LiveActivityContext) -> AnyView {
         AnyView(EmptyView())
     }

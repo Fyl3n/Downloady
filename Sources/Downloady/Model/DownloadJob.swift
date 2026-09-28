@@ -326,6 +326,26 @@ public struct QueueSummary: Equatable, Sendable {
 }
 
 extension DownloadJob {
+    static let lostFileMessage = "Moved or deleted"
+
+    /// Whether this Job finished but its file is no longer where it was saved.
+    func hasLostFile(exists: (URL) -> Bool = { FileManager.default.fileExists(atPath: $0.path) }) -> Bool {
+        guard state == .finished, let file else { return false }
+        return !exists(file)
+    }
+
+    /// The status line split around its percentage, so a narrow row cuts the
+    /// words and keeps the number: "Trans… · 42 %". `nil` when it has none.
+    var statusSegments: (head: String, percent: String, tail: String)? {
+        let parts = statusText.components(separatedBy: " · ")
+        guard parts.count > 1, let index = parts.firstIndex(where: { $0.hasSuffix("%") }) else { return nil }
+        return (
+            parts[..<index].joined(separator: " · "),
+            parts[index],
+            parts[(index + 1)...].joined(separator: " · ")
+        )
+    }
+
     var isScheduled: Bool {
         if case .scheduled = state { true } else { false }
     }

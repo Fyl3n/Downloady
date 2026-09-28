@@ -379,6 +379,7 @@ public final class DownloadModel: ObservableObject {
     /// browser now, so the URL is the one in front of the user.
     public func formDidAppear() {
         visibleForms += 1
+        checkFiles()
         refreshSpeechStatus()
         refreshFromBrowser()
     }
@@ -395,8 +396,9 @@ public final class DownloadModel: ObservableObject {
         guard let host else { return }
         if !host.shelf.isExpanded {
             sessionIsFresh = true
-        } else if sessionIsFresh, visibleForms > 0 {
-            refreshFromBrowser()
+        } else {
+            checkFiles()
+            if sessionIsFresh, visibleForms > 0 { refreshFromBrowser() }
         }
     }
 
@@ -1210,7 +1212,21 @@ public final class DownloadModel: ObservableObject {
 
     /// Shows a file in Finder.
     public func reveal(_ file: URL) {
+        guard FileManager.default.fileExists(atPath: file.path) else { return checkFiles() }
         host?.workspace.revealInFinder(file)
+    }
+
+    /// Turns every finished Job whose file was moved or deleted into a failed
+    /// row, the way a browser's downloads page does. Checked whenever
+    /// Downloady comes into view: a few `stat`s, the queue keeps six.
+    public func checkFiles() {
+        for job in jobs where job.hasLostFile() {
+            update(job.id) {
+                $0.state = .failed(DownloadJob.lostFileMessage)
+                $0.file = nil
+                $0.transcript = nil
+            }
+        }
     }
 
     /// Replaces the bar with the pasteboard's text, when it holds a web link.

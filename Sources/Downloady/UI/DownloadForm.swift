@@ -503,13 +503,12 @@ struct DownloadActionRow: View {
     private func progressRow(_ job: DownloadJob) -> some View {
         HStack(spacing: DroppySpacing.xsm) {
             VStack(alignment: .leading, spacing: DroppySpacing.xs) {
-                if !compact || job.isRecording {
-                    JobStatusText(job: job)
-                        .font(.system(size: 11))
-                        .monospacedDigit()
-                        .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
-                        .lineLimit(1)
-                }
+                // Paired too: "Trans… · 42 %" when the row is narrow.
+                JobStatusText(job: job)
+                    .font(.system(size: 11))
+                    .monospacedDigit()
+                    .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+                    .lineLimit(1)
                 // A Recording has no percentage to fill a bar with.
                 if !job.isRecording {
                     ToolProgressBar(fraction: job.fraction ?? 0, label: "Download progress")
