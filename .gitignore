@@ -7,3 +7,6 @@ shots/
 # Regenerate with `droppykit agent --force`.
 .mcp.json
 .cursor/mcp.json
+
+# Local planning notes, not published.
+docs/PLAN.md

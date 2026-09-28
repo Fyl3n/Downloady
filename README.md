@@ -56,7 +56,7 @@ The **Text** picker writes an `.srt` next to the media.
 
 ## The tools Downloady uses
 
-Downloady never puts an executable inside its own bundle. Both tools live in
+Downloady never puts an executable inside its own bundle. The copies it downloads live in
 Droppy's container for this droplet, under `tools/`. In Settings each tool
 has a source: **Downloady** (its own copy), **This Mac** (one you installed,
 e.g. with Homebrew) or **Custom** (a path you choose). Picking This Mac when
@@ -66,11 +66,20 @@ none is installed switches to Custom and says so.
 | --- | --- | --- |
 | yt-dlp | The `yt-dlp_macos.zip` onedir build from the latest [yt-dlp GitHub release](https://github.com/yt-dlp/yt-dlp/releases), over HTTPS. | Against the `SHA2-256SUMS` file published with that release. |
 | ffmpeg | This Mac's by default: `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`, then `PATH`. Only when the Mac has none, or you pick Downloady, a static build for the running architecture from [ffmpeg.martin-riedl.de](https://ffmpeg.martin-riedl.de), over HTTPS. | Against the checksum published beside that exact build. |
+| Deno | Runs the JavaScript challenges YouTube sets yt-dlp. This Mac's by default, including `~/.deno/bin`. Only when the Mac has none, or you pick Downloady, the zip for the running architecture from the latest [Deno GitHub release](https://github.com/denoland/deno/releases), over HTTPS. | Against the `.sha256sum` published with that release. |
 
 yt-dlp is installed on first run, without a click. A download whose checksum does
-not match is discarded and nothing is written into place. Downloady checks
-GitHub for a newer yt-dlp when the Settings pane opens and offers **Update**,
-and leaves a yt-dlp from This Mac or a custom path alone.
+not match is discarded and nothing is written into place.
+
+When the Settings pane opens, Downloady looks for newer releases: GitHub for
+yt-dlp and Deno, ffmpeg.martin-riedl.de for its ffmpeg build, and
+[formulae.brew.sh](https://formulae.brew.sh) for a tool Homebrew installed. It
+offers **Update** for its own copies. For a copy on This Mac it shows the
+command that updates it (`brew upgrade`, `pipx upgrade` or `deno upgrade`) and
+never touches the copy itself.
+
+Besides those, Downloady connects to the page you give it, through yt-dlp,
+and to the page's host for its thumbnail and favicon.
 
 yt-dlp runs with `--ignore-config`, so a `yt-dlp` configuration file of your
 own cannot change what Downloady asks for or the output it reads back.
@@ -94,9 +103,11 @@ press it; Downloady never reads Droppy's clipboard history.
   ffmpeg is LGPL v2.1 or later, and GPL v2 or later when a build enables a GPL
   component, so which licence applies depends on the build in use. A Homebrew
   ffmpeg you already have is covered by whatever Homebrew built for you.
+- **Deno** runs YouTube's JavaScript challenges for yt-dlp. It is MIT
+  licensed; see [its licence](https://github.com/denoland/deno/blob/main/LICENSE.md).
 - Downloady itself is MIT.
 
-Downloady is not affiliated with yt-dlp, ffmpeg or any site it downloads from.
+Downloady is not affiliated with yt-dlp, ffmpeg, Deno or any site it downloads from.
 Download only what you have the right to download.
 
 ## Developing
@@ -105,9 +116,8 @@ Download only what you have the right to download.
 droppykit run        # open it in Droppy's Settings panel
 droppykit build      # produce Downloady.droplet
 droppykit validate   # the checks a submission runs
-droppykit submit     # open the submission form, filled in from this checkout
+droppykit submit     # open the merge request on the Droplet Store repository
 ```
 
-`AGENTS.md` is the brief for a coding agent, `docs/PLAN.md` the plan, and
-`docs/tickets/` the work. `swift test` covers the pure logic; the network
+`AGENTS.md` is the brief for a coding agent and `docs/tickets/` the work. `swift test` covers the pure logic; the network
 tests only run with `DOWNLOADY_NETWORK_TESTS=1`.

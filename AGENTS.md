@@ -9,7 +9,7 @@ the notch, the shelf, the lock screen and the menu bar.
 
 - Droplet id: `downloady`. It is also `DownloadyDroplet.id` in Swift and `id` in `droplet.json`; the three must agree or the loader refuses the bundle.
 - Swift product: `Downloady`, a dynamic library. The harness target is `DownloadyHarness`.
-- SDK checkout: `~/Documents/droppykit` (DroppyKit 1.11.0). Docs online: https://getdroppy.app/docs/droppykit
+- SDK checkout: `~/Documents/droppykit` (DroppyKit 1.18.0). Docs online: https://getdroppy.app/docs/droppykit
 - Host: Droppy 15.3 or later, which runs an unsigned bundle once its user approves that build under Settings, Store, Local droplets and asks again each time it opens, or the free Droppy Playground (https://getdroppy.app/download/playground), which loads unsigned bundles without asking.
 
 ## The loop
@@ -123,7 +123,9 @@ package pins; `droppykit update` moves both to the newest release. A build that 
 - **`droplet.json` is the truth for the build.** `Info.plist` is generated from it.
   `version` is numeric `major.minor.patch`; `summary` is at most 60 characters;
   `minAppVersion` stays `15.3.0` unless the droplet needs something newer; `kit.minAPI` is
-  the oldest DroppyKit API the droplet actually calls.
+  the oldest DroppyKit API the droplet actually calls. `droppykit build` fails when it is
+  older than that and names the calls and the version to set; set that version, never
+  lower it to get a droplet loaded.
 - **Do not edit anything under `~/Documents/droppykit`.** That is the SDK checkout; fixes there go
   upstream. This package is where the work is.
 
@@ -199,7 +201,7 @@ https://getdroppy.app/droplet-developer-terms.
 
 ## Downloady project notes
 
-- The plan and the tickets are in `docs/PLAN.md` and `docs/tickets/`. Work one ticket at a time, and remove its `TODO(T<n>)` markers as you go (`grep -rn "TODO(T" Sources`).
-- All droplet code stays in the single `Downloady` target: `droppykit build` links only that module's objects. Pure logic is tested in `Tests/DownloadyTests` (`swift test`).
-- yt-dlp and ffmpeg never go inside the bundle. They live in `host.environment.containerDirectory/tools/`.
+- The plan is `docs/PLAN.md`, kept locally and out of the repository; the tickets are in `docs/tickets/`. Work one ticket at a time, and remove its `TODO(T<n>)` markers as you go (`grep -rn "TODO(T" Sources`).
+- All droplet code stays in the single `Downloady` target. Pure logic is tested in `Tests/DownloadyTests` (`swift test`).
+- yt-dlp, ffmpeg and Deno never go inside the bundle. They live in `host.environment.containerDirectory/tools/`.
 - Never run a `Process` or `NSAppleScript` on the main actor. Droplets share Droppy's main thread.
