@@ -202,6 +202,8 @@ struct JobStatusText: View {
                         Text(segments.tail).layoutPriority(-1)
                     }
                 }
+                // VoiceOver reads one line, as it did before the split.
+                .accessibilityElement(children: .combine)
             } else {
                 Text(job.statusText)
             }

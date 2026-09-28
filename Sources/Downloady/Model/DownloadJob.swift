@@ -326,8 +326,6 @@ public struct QueueSummary: Equatable, Sendable {
 }
 
 extension DownloadJob {
-    static let lostFileMessage = "Moved or deleted"
-
     /// Whether this Job finished but its file is no longer where it was saved.
     func hasLostFile(exists: (URL) -> Bool = { FileManager.default.fileExists(atPath: $0.path) }) -> Bool {
         guard state == .finished, let file else { return false }

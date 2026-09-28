@@ -1222,7 +1222,7 @@ public final class DownloadModel: ObservableObject {
     public func checkFiles() {
         for job in jobs where job.hasLostFile() {
             update(job.id) {
-                $0.state = .failed(DownloadJob.lostFileMessage)
+                $0.state = .failed("Moved or deleted")
                 $0.file = nil
                 $0.transcript = nil
             }
