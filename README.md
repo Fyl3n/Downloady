@@ -1,123 +1,98 @@
 # Downloady
 
-Download the video in front of you, from Droppy's shelf.
+Download the video in front of you, from [Droppy](https://getdroppy.app)'s shelf.
 
-Downloady is a Droplet for [Droppy](https://getdroppy.app), the Dynamic Island
-and shelf for Mac. It puts a URL bar and three pickers on the notch, hands the
-link to [yt-dlp](https://github.com/yt-dlp/yt-dlp), and tells you when the file
-has landed.
+Paste a link, or open the shelf while a video plays in your browser. Downloady
+hands it to [yt-dlp](https://github.com/yt-dlp/yt-dlp) and tells you when the
+file has landed.
 
-## Using it
+A Droplet built with [DroppyKit](https://getdroppy.app/docs/droppykit).
 
-1. Open the shelf and pick the Downloady widget. The first time, Downloady
-   fetches its own copy of yt-dlp on its own (see below); the widget shows
-   the progress.
-2. Paste a link, or just open the shelf while a video page is in front of you
-   in Safari or a Chromium browser — Downloady fills the bar in on its own.
-   Turn that off in Settings if you would rather paste. By default it also
-   looks the page up when you switch to your browser, so the link is ready
-   before you open the shelf; **Check the tab in the background** in Settings
-   narrows that to when the widget is on your shelf, or to nothing at all.
-3. Choose the quality, the video container and the audio format. Anything the
-   page cannot give you is greyed out. The choice applies to this download;
-   the next one starts on the default you set in Settings.
-4. Press **Download**. It runs in a queue you can leave: the live activity
-   shows the progress when you look away, and a HUD says "Saved" when it is
-   done, with **Show in Finder**. Cancelling a download takes its half-written
-   files with it.
+## What it does
 
-Files land in ~/Downloads unless you choose another folder in Settings.
+- **Picks up the link for you.** Opening the shelf over a video page in Safari
+  or a Chromium browser fills the URL bar in. Or paste one.
+- **You choose the format.** Quality, video container and audio format.
+  Anything the page cannot give you is greyed out.
+- **A queue you can walk away from.** The live activity shows progress, a HUD
+  says "Saved" with **Show in Finder**. Cancelling removes the half-written files.
+- **Subtitles or a transcript.** Write the site's subtitles as `.srt`, or
+  transcribe the audio on this Mac with macOS 26's speech models. The audio
+  never leaves the machine.
+- **Playlists and live streams.** One download per playlist entry; live
+  streams record until you stop them.
+- **Quick actions.** Five global shortcuts, unbound by default. Bind them in
+  Droppy's Settings, Shortcuts.
 
-## Quick actions
+| Shortcut | Downloads |
+| --- | --- |
+| Open Downloady | — |
+| Download this video / audio from this video | The page in front of you in your browser |
+| Download the pasted video / audio from the pasted video | The link on the clipboard |
 
-Downloady registers five global shortcuts, with no key bound by default. Bind
-the ones you want in Droppy's Settings, Shortcuts:
+Files land in `~/Downloads` unless you pick another folder in Settings.
 
-- **Open Downloady**
-- **Download this video** and **Download audio from this video**: the page
-  in front of you in your browser
-- **Download the pasted video** and **Download audio from the pasted video**:
-  the link on the clipboard
+## Requirements
 
-Each one opens Downloady on the notch, which shows the download starting, or
-why it could not.
+- Droppy 15.3 or later
+- macOS 26 and ffmpeg for **Transcribe**, plus macOS's speech recognition
+  permission (Settings has a **Grant** button)
+- macOS's Automation permission to read your browser's front tab
 
-## Text beside the video
+## Tools
 
-The **Text** picker writes an `.srt` next to the media.
+yt-dlp is installed on first run, without a click. In Settings each tool can come
+from **Downloady** (its own copy), **This Mac** (e.g. Homebrew) or a **Custom** path.
+Downloady's own copies live in its container under `tools/`, never inside the bundle.
 
-- **Subtitles** are the site's own, written by yt-dlp and converted to SubRip.
-  Greyed out when the page has none.
-- **Transcribe** makes one on this Mac with macOS 26's speech models, after
-  the download, in the background. The audio never leaves the machine. It
-  needs macOS 26, ffmpeg, and macOS's permission to recognise speech, which
-  Downloady's settings ask for with **Grant**. Refuse it and Transcribe is
-  greyed out, with the reason on the picker.
+| Tool | Used for | Downloady's copy comes from | Verified against |
+| --- | --- | --- | --- |
+| yt-dlp | Downloading | [yt-dlp releases](https://github.com/yt-dlp/yt-dlp/releases) (`yt-dlp_macos.zip`) | `SHA2-256SUMS` |
+| ffmpeg | Merging streams, transcribing | [ffmpeg.martin-riedl.de](https://ffmpeg.martin-riedl.de), only when the Mac has none | The published checksum |
+| Deno | YouTube's JavaScript challenges | [Deno releases](https://github.com/denoland/deno/releases), only when the Mac has none | `.sha256sum` |
 
-## The tools Downloady uses
+A download whose checksum does not match is thrown away. When Settings opens,
+Downloady checks for newer releases and offers **Update** for its own copies; for
+a copy on This Mac it shows the command to run (`brew upgrade`, `pipx upgrade`,
+`deno upgrade`) and copies it for you, never touching the tool itself.
 
-Downloady never puts an executable inside its own bundle. The copies it downloads live in
-Droppy's container for this droplet, under `tools/`. In Settings each tool
-has a source: **Downloady** (its own copy), **This Mac** (one you installed,
-e.g. with Homebrew) or **Custom** (a path you choose). Picking This Mac when
-none is installed switches to Custom and says so.
+yt-dlp runs with `--ignore-config`, so your own yt-dlp config cannot change
+what Downloady asks for.
 
-| Tool | Where it comes from | How it is checked |
-| --- | --- | --- |
-| yt-dlp | The `yt-dlp_macos.zip` onedir build from the latest [yt-dlp GitHub release](https://github.com/yt-dlp/yt-dlp/releases), over HTTPS. | Against the `SHA2-256SUMS` file published with that release. |
-| ffmpeg | This Mac's by default: `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`, then `PATH`. Only when the Mac has none, or you pick Downloady, a static build for the running architecture from [ffmpeg.martin-riedl.de](https://ffmpeg.martin-riedl.de), over HTTPS. | Against the checksum published beside that exact build. |
-| Deno | Runs the JavaScript challenges YouTube sets yt-dlp. This Mac's by default, including `~/.deno/bin`. Only when the Mac has none, or you pick Downloady, the zip for the running architecture from the latest [Deno GitHub release](https://github.com/denoland/deno/releases), over HTTPS. | Against the `.sha256sum` published with that release. |
+## Privacy
 
-yt-dlp is installed on first run, without a click. A download whose checksum does
-not match is discarded and nothing is written into place.
-
-When the Settings pane opens, Downloady looks for newer releases: GitHub for
-yt-dlp and Deno, ffmpeg.martin-riedl.de for its ffmpeg build, and
-[formulae.brew.sh](https://formulae.brew.sh) for a tool Homebrew installed. It
-offers **Update** for its own copies. For a copy on This Mac it shows the
-command that updates it (`brew upgrade`, `pipx upgrade` or `deno upgrade`) and
-never touches the copy itself.
-
-Besides those, Downloady connects to the page you give it, through yt-dlp,
-and to the page's host for its thumbnail and favicon.
-
-yt-dlp runs with `--ignore-config`, so a `yt-dlp` configuration file of your
-own cannot change what Downloady asks for or the output it reads back.
-
-Downloady asks for these capabilities and no others: `expanded-surface`,
-`shelf-read`, `hud`, `network-client`, `downloads`, `apple-events` (reading
-the front tab of a browser, which macOS also gates behind its own Automation
-prompt), `speech-recognition` (transcribing on this Mac, which macOS gates
-behind its own prompt too) and `global-shortcuts` (the quick actions). A
-"pasted video" quick action reads the link on the clipboard once, when you
-press it; Downloady never reads Droppy's clipboard history.
+- **Network:** the page you give it (through yt-dlp), that page's host for the
+  thumbnail and favicon, and the tool sources above.
+- **Clipboard:** read once when you press paste or a "pasted video" shortcut.
+  Droppy's clipboard history is never read.
+- **Browser:** the front tab's URL, when you open the shelf or switch to your
+  browser. **Check the tab in the background** in Settings limits that to when
+  the widget is on your shelf, or turns it off.
+- **Capabilities:** `expanded-surface`, `shelf-read`, `hud`, `network-client`,
+  `downloads`, `apple-events`, `clipboard-write`, `speech-recognition`,
+  `global-shortcuts`. Nothing else.
 
 ## Credits and licences
 
-- **yt-dlp** does the downloading. It is released into the public domain under
-  the [Unlicense](https://github.com/yt-dlp/yt-dlp/blob/master/LICENSE).
-- **ffmpeg** merges the video and audio streams. The builds Downloady downloads
-  come from [ffmpeg.martin-riedl.de](https://ffmpeg.martin-riedl.de); the
-  sources are at [ffmpeg.org](https://ffmpeg.org/download.html) and the build
-  scripts at [github.com/martin-riedl/ffmpeg-build](https://github.com/martin-riedl/ffmpeg-build).
-  ffmpeg is LGPL v2.1 or later, and GPL v2 or later when a build enables a GPL
-  component, so which licence applies depends on the build in use. A Homebrew
-  ffmpeg you already have is covered by whatever Homebrew built for you.
-- **Deno** runs YouTube's JavaScript challenges for yt-dlp. It is MIT
-  licensed; see [its licence](https://github.com/denoland/deno/blob/main/LICENSE.md).
-- Downloady itself is MIT.
+| Component | Role | Licence |
+| --- | --- | --- |
+| [yt-dlp](https://github.com/yt-dlp/yt-dlp) | Downloading | [Unlicense](https://github.com/yt-dlp/yt-dlp/blob/master/LICENSE) |
+| [ffmpeg](https://ffmpeg.org/download.html) | Merging streams | LGPL 2.1+, or GPL 2+ when the build enables a GPL component ([build scripts](https://github.com/martin-riedl/ffmpeg-build)) |
+| [Deno](https://github.com/denoland/deno) | JavaScript challenges | [MIT](https://github.com/denoland/deno/blob/main/LICENSE.md) |
+| Downloady | | MIT, see [LICENSE](LICENSE) |
 
-Downloady is not affiliated with yt-dlp, ffmpeg, Deno or any site it downloads from.
-Download only what you have the right to download.
+Downloady is not affiliated with yt-dlp, ffmpeg, Deno or any site it downloads
+from. Download only what you have the right to download.
 
 ## Developing
 
 ```bash
 droppykit run        # open it in Droppy's Settings panel
-droppykit build      # produce Downloady.droplet
+droppykit build      # produce .build/Downloady.droplet
 droppykit validate   # the checks a submission runs
-droppykit submit     # open the merge request on the Droplet Store repository
+swift test           # pure logic; DOWNLOADY_NETWORK_TESTS=1 adds network tests
 ```
 
-`AGENTS.md` is the brief for a coding agent. `swift test` covers the pure logic; the network
-tests only run with `DOWNLOADY_NETWORK_TESTS=1`.
+Drop `.build/Downloady.droplet` on
+[Droppy Playground](https://getdroppy.app/download/playground) to try it on the
+real notch. `AGENTS.md` is the brief for coding agents.
