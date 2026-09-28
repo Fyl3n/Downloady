@@ -119,5 +119,5 @@ droppykit validate   # the checks a submission runs
 droppykit submit     # open the merge request on the Droplet Store repository
 ```
 
-`AGENTS.md` is the brief for a coding agent and `docs/tickets/` the work. `swift test` covers the pure logic; the network
+`AGENTS.md` is the brief for a coding agent. `swift test` covers the pure logic; the network
 tests only run with `DOWNLOADY_NETWORK_TESTS=1`.

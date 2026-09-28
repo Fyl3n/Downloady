@@ -201,7 +201,7 @@ https://getdroppy.app/droplet-developer-terms.
 
 ## Downloady project notes
 
-- The plan is `docs/PLAN.md`, kept locally and out of the repository; the tickets are in `docs/tickets/`. Work one ticket at a time, and remove its `TODO(T<n>)` markers as you go (`grep -rn "TODO(T" Sources`).
+- The plan, the tickets, the ADRs and the glossary (`CONTEXT.md`) live outside this package, in `~/Documents/Downloady-notes/`: `droppykit submit` copies everything in this folder into the Store's merge request, so nothing that is not the droplet stays here. Work one ticket at a time, and remove its `TODO(T<n>)` markers as you go (`grep -rn "TODO(T" Sources`).
 - All droplet code stays in the single `Downloady` target. Pure logic is tested in `Tests/DownloadyTests` (`swift test`).
 - yt-dlp, ffmpeg and Deno never go inside the bundle. They live in `host.environment.containerDirectory/tools/`.
 - Never run a `Process` or `NSAppleScript` on the main actor. Droplets share Droppy's main thread.
