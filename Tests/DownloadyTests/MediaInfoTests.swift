@@ -151,3 +151,110 @@ import Testing
         #expect(model.downloadFolderMessage != nil)
     }
 }
+
+@Suite struct PlaylistLookupTests {
+    /// Trimmed from a real `yt-dlp --flat-playlist -J` of a 54-entry YouTube
+    /// playlist, with the second entry hand-edited into a private one.
+    static let playlistJSON = """
+    {
+      "id": "PLFs4vir_WsTwEd-nJgVJCZPNL3HALHHpF", "title": "The Universe and Space stuff",
+      "availability": "public", "playlist_count": 54, "_type": "playlist",
+      "extractor_key": "YoutubeTab", "extractor": "youtube:tab",
+      "webpage_url": "https://www.youtube.com/playlist?list=PLFs4vir_WsTwEd-nJgVJCZPNL3HALHHpF",
+      "entries": [
+        {"title": "Three Ways to Destroy the Universe", "duration": 377, "live_status": null, "availability": null,
+         "ie_key": "Youtube", "id": "4_aOIA-vyBo", "_type": "url", "url": "https://www.youtube.com/watch?v=4_aOIA-vyBo"},
+        {"title": "[Private video]", "duration": null, "live_status": null, "availability": "private",
+         "ie_key": "Youtube", "id": "e-P5IFTqB98", "_type": "url", "url": "https://www.youtube.com/watch?v=e-P5IFTqB98"},
+        {"title": "Space Elevator – Science Fiction or the Future of Mankind?", "duration": 326, "live_status": null,
+         "availability": null, "ie_key": "Youtube", "id": "qPQQwqGWktE", "_type": "url",
+         "url": "https://www.youtube.com/watch?v=qPQQwqGWktE"}
+      ]
+    }
+    """
+
+    @Test func decodesAFlatPlaylist() throws {
+        let info = try FormatAvailabilityTests.decode(Self.playlistJSON)
+        #expect(info.isPlaylist)
+        #expect(info.playlistCount == 54)
+        #expect(info.title == "The Universe and Space stuff")
+        #expect(info.formats == nil)
+        #expect(info.entries?.count == 3)
+        #expect(info.entries?.first == PlaylistEntry(
+            url: "https://www.youtube.com/watch?v=4_aOIA-vyBo",
+            title: "Three Ways to Destroy the Universe",
+            duration: 377,
+            type: "url"
+        ))
+        #expect(info.downloadableCount == 2)
+        #expect(FormatAvailability(info: info) == .unrestricted)
+    }
+
+    @Test func aSingleVideoIsNotAPlaylist() throws {
+        let info = try FormatAvailabilityTests.decode(FormatAvailabilityTests.youtubeJSON)
+        #expect(!info.isPlaylist)
+        #expect(info.entries == nil)
+        #expect(info.formats?.count == 8)
+    }
+
+    @Test func unavailableEntriesSayWhy() {
+        func reason(title: String = "A video", availability: String? = nil, live: String? = nil) -> String? {
+            PlaylistEntry(url: "https://youtu.be/a", title: title, availability: availability, liveStatus: live).unavailableReason
+        }
+        #expect(reason() == nil)
+        #expect(reason(availability: "public") == nil)
+        #expect(reason(availability: "unlisted") == nil)
+        #expect(reason(availability: "private") == "Private video")
+        #expect(reason(availability: "premium_only") != nil)
+        #expect(reason(availability: "subscriber_only") != nil)
+        #expect(reason(availability: "needs_auth") != nil)
+        #expect(reason(title: "[Private video]") == "Private video")
+        #expect(reason(title: "[Deleted video]") == "Deleted video")
+        #expect(reason(live: "is_live") == "Live stream: open it on its own to record it")
+        #expect(reason(live: "is_upcoming") == "Live stream: open it on its own to record it")
+        #expect(reason(live: "was_live") == nil)
+    }
+}
+
+@Suite struct LiveLookupTests {
+    /// Trimmed from real `yt-dlp -J` output: a 24/7 stream on now, one that
+    /// begins in 10 hours (with `--ignore-no-formats-error`), and one over.
+    static let liveJSON = """
+    {"id": "wBhxknOJibc", "title": "Sky News live", "extractor_key": "Youtube", "is_live": true,
+     "live_status": "is_live", "release_timestamp": 1790579361, "duration": null,
+     "formats": [{"format_id": "230", "ext": "mp4", "vcodec": "avc1.4D401E", "acodec": "none", "height": 360}]}
+    """
+    static let upcomingJSON = """
+    {"id": "j9epFget1W8", "title": "Space Station Operations Update", "extractor_key": "Youtube", "is_live": false,
+     "live_status": "is_upcoming", "release_timestamp": 1790622000, "duration": null, "formats": []}
+    """
+    static let postLiveJSON = """
+    {"id": "abc", "title": "Yesterday's stream", "extractor_key": "Youtube", "was_live": true,
+     "live_status": "post_live", "release_timestamp": 1790500000, "duration": 3600,
+     "formats": [{"format_id": "18", "ext": "mp4", "vcodec": "avc1", "acodec": "mp4a", "height": 360}]}
+    """
+
+    @Test func aLiveStreamIsRecordedAtOnce() throws {
+        let info = try FormatAvailabilityTests.decode(Self.liveJSON)
+        #expect(info.liveStatus == "is_live")
+        #expect(info.releaseTimestamp == 1_790_579_361)
+        #expect(info.isLiveStream)
+        // It began in the past: no Scheduled recording.
+        #expect(info.scheduledStart == nil)
+    }
+
+    @Test func anUpcomingStreamIsScheduled() throws {
+        let info = try FormatAvailabilityTests.decode(Self.upcomingJSON)
+        #expect(info.isLiveStream)
+        #expect(info.scheduledStart == Date(timeIntervalSince1970: 1_790_622_000))
+        #expect(FormatAvailability(info: info) == .unrestricted)
+    }
+
+    @Test func aStreamThatEndedIsAnOrdinaryVideo() throws {
+        let info = try FormatAvailabilityTests.decode(Self.postLiveJSON)
+        #expect(info.liveStatus == "post_live")
+        #expect(!info.isLiveStream)
+        #expect(info.scheduledStart == nil)
+        #expect(!MediaInfo(id: "a", title: "A", extractorKey: "Youtube", formats: nil, liveStatus: "was_live").isLiveStream)
+    }
+}

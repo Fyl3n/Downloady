@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import Testing
 @testable import Downloady
@@ -55,7 +56,18 @@ import Testing
 
     @Test func fetchArgumentsWithoutFFmpeg() {
         let args = YtDlpCommand.fetchInfo(URL(string: "https://example.com")!, ffmpeg: nil)
-        #expect(args == ["--ignore-config", "--no-playlist", "--newline", "--no-colors", "-J", "--skip-download", "--", "https://example.com"])
+        #expect(args == [
+            "--ignore-config", "--no-playlist", "--newline", "--no-colors",
+            "-J", "--flat-playlist", "--skip-download", "--ignore-no-formats-error", "--", "https://example.com",
+        ])
+    }
+
+    /// A Playlist's Lookup lists its entries; a download never flattens one.
+    @Test func onlyTheLookupFlattensPlaylists() {
+        let url = URL(string: "https://www.youtube.com/playlist?list=PL1")!
+        #expect(YtDlpCommand.fetchInfo(url, ffmpeg: nil).contains("--flat-playlist"))
+        let download = YtDlpCommand.download(url, options: DownloadOptions(), folder: URL(fileURLWithPath: "/tmp"), ffmpeg: nil)
+        #expect(!download.contains("--flat-playlist"))
     }
 
     @Test func denoIsPassedByPath() {
@@ -124,6 +136,43 @@ import Testing
         #expect(YtDlpCommand.isUnsupported(stderr: stderr))
         #expect(YtDlpCommand.errorMessage(fromStderr: "one\ntwo\n\n") == "two")
         #expect(YtDlpCommand.errorMessage(fromStderr: "") == "")
+        // `--ignore-no-formats-error` turns the reason into a warning.
+        #expect(YtDlpCommand.errorMessage(fromStderr: "WARNING: [youtube] X: This video is DRM protected") == "[youtube] X: This video is DRM protected")
+    }
+
+    /// `deactivate()` Stops the Recordings, then cancels everything: the
+    /// cancel must not turn the Stop into SIGTERM, or the file is lost.
+    @Test func aCancelAfterStopLetsTheRecordingFinish() async throws {
+        let child = ChildProcess(
+            executable: URL(fileURLWithPath: "/bin/sh"),
+            arguments: ["-c", "trap 'exit 0' INT; while :; do sleep 0.1; done"]
+        )
+        let exit = AsyncStream<ChildProcess.Exit?>.makeStream()
+        child.start(collectStdout: true, onLine: { _ in }) { result in
+            exit.continuation.yield(try? result.get().0)
+        }
+        try await Task.sleep(for: .milliseconds(300))
+        child.interrupt()
+        child.terminate()
+        var status: ChildProcess.Exit?
+        for await value in exit.stream { status = value; break }
+        #expect(status?.status == 0)
+        #expect(status?.reason == .exit)
+        #expect(child.wasInterrupted)
+        #expect(!child.wasTerminated)
+    }
+
+    /// Only a Recording waits for a late broadcast and has ffmpeg write MP4.
+    @Test func aRecordingWaitsAndWritesMP4() {
+        let url = URL(string: "https://www.youtube.com/watch?v=live")!
+        let folder = URL(fileURLWithPath: "/tmp")
+        let recording = YtDlpCommand.download(url, options: DownloadOptions(), folder: folder, ffmpeg: nil, recording: true)
+        #expect(recording.firstIndex(of: "--wait-for-video").map { recording[$0 + 1] } == "15-60")
+        #expect(recording.contains("--no-hls-use-mpegts"))
+        #expect(recording.suffix(2) == ["--", url.absoluteString])
+        let download = YtDlpCommand.download(url, options: DownloadOptions(), folder: folder, ffmpeg: nil)
+        #expect(!download.contains("--wait-for-video"))
+        #expect(!download.contains("--no-hls-use-mpegts"))
     }
 
     @Test func theProbeStaysOffTheNetwork() {
@@ -268,6 +317,34 @@ struct YtDlpClientNetworkTests {
         client.cancelAll()
         await #expect(throws: YtDlpError.cancelled) { _ = try await task.value }
         try await Task.sleep(for: .seconds(1))
+        #expect(Self.runningYtDlp() == 0)
+    }
+
+    /// Stop on a real Live stream: SIGINT to yt-dlp alone leaves a finished
+    /// MP4 and nothing else. `DOWNLOADY_LIVE_URL` picks the stream.
+    @Test func stoppingARecordingKeepsAPlayableFile() async throws {
+        let live = URL(string: ProcessInfo.processInfo.environment["DOWNLOADY_LIVE_URL"] ?? "https://www.youtube.com/@SkyNews/live")!
+        let folder = try Self.makeFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let stream = client.download(live, options: DownloadOptions(quality: .p480), into: folder, recording: true)
+        let recording = AsyncStream<Void>.makeStream()
+        let task = Task { () -> URL? in
+            var file: URL?
+            for try await event in stream {
+                if case .destination = event { recording.continuation.yield() }
+                if case .finished(let url) = event { file = url }
+            }
+            return file
+        }
+        for await _ in recording.stream { break }
+        try await Task.sleep(for: .seconds(30))
+        client.stopRecordings()
+        let file = try #require(try await task.value)
+        #expect(file.pathExtension == "mp4")
+        let names = try FileManager.default.contentsOfDirectory(atPath: folder.path)
+        #expect(names == [file.lastPathComponent], "left behind: \(names)")
+        let seconds = try await AVURLAsset(url: file).load(.duration).seconds
+        #expect(seconds > 20, "recorded \(seconds) s")
         #expect(Self.runningYtDlp() == 0)
     }
 

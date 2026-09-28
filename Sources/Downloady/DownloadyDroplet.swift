@@ -174,7 +174,7 @@ public final class DownloadyDroplet: NSObject, ObservableObject, Droplet {
         switch notice {
         case .downloaded(let job):
             guard let file = job.file else { return }
-            presentCompletionHUD(title: "Downloaded", file: file)
+            presentCompletionHUD(title: job.isRecording ? "Recorded" : "Downloaded", file: file)
         case .transcribed(let job):
             guard let transcript = job.transcript else { return }
             presentCompletionHUD(title: "Transcript ready", file: transcript)
@@ -357,7 +357,8 @@ extension DownloadyDroplet: LiveActivityProviding {
             // Below Droppy's own timers and calls: a download is a
             // status, not something the user is waiting on the second.
             priority: 150,
-            accessibilityTitle: summary.leading?.isTranscribing == true ? "Transcribing" : "Downloading",
+            accessibilityTitle: summary.leading?.isTranscribing == true ? "Transcribing"
+                : summary.leading?.isRecording == true ? "Recording" : "Downloading",
             isInteractive: false,
             // A download the user started is worth keeping in view until it
             // lands. Left false, the host only reveals the row while the

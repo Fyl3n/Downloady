@@ -63,6 +63,8 @@ Every unfinished part is marked `TODO(T<n>)` in the code:
 | T3 | [Browser URL auto-detection](tickets/T3-browser-autofill.md) | T2 (needs `fetchInfo`) |
 | T4 | [Polish, completion feedback and release readiness](tickets/T4-polish-release.md) | T1–T3 |
 | T5 | [Text, and downloads that run in the background](tickets/T5-text-and-queue.md) | T1–T4 |
+| T6 | [Playlists become one Job per entry](tickets/T6-playlists.md) | T5 |
+| T7 | [Live streams become Recordings](tickets/T7-live-recordings.md) | T5 |
 
 ## Definition of done (every ticket)
 

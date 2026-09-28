@@ -66,8 +66,9 @@ public final class SpeechTranscriptionService {
     }
 
     /// Transcribes `media` and writes a `.srt` beside it. `duration` is the
-    /// media's length in seconds, used for progress. Cancelling the consuming
-    /// task stops ffmpeg and the analyzer.
+    /// media's length in seconds, used for progress; without one (a
+    /// Recording's length is known only once it is Stopped) it is read from
+    /// the file. Cancelling the consuming task stops ffmpeg and the analyzer.
     public func transcribe(
         media: URL,
         duration: Double?,
@@ -85,6 +86,10 @@ public final class SpeechTranscriptionService {
         if Task.isCancelled { throw TranscriptionError.cancelled }
 
         log("Transcribing \(media.lastPathComponent) on this Mac")
+        var duration = duration
+        if duration == nil, let length = try? await AVURLAsset(url: media).load(.duration).seconds, length.isFinite {
+            duration = length
+        }
         let cues = try await SpeechRun.run(
             audio: audio,
             duration: duration,

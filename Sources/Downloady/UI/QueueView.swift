@@ -44,6 +44,10 @@ struct QueueView: View {
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
                 Spacer(minLength: 0)
+                if model.jobs.contains(where: \.isWaiting) {
+                    Button("Cancel waiting") { model.cancelWaitingJobs() }
+                        .buttonStyle(DroppyQuietButtonStyle(size: .small))
+                }
                 if model.jobs.contains(where: { !$0.isActive }) {
                     Button("Clear finished") { model.clearFinishedJobs() }
                         .buttonStyle(DroppyQuietButtonStyle(size: .small))
@@ -106,7 +110,7 @@ struct QueueRow: View {
                         ToolProgressBar(fraction: fraction, label: "Progress")
                             .frame(width: 72)
                     }
-                    Text(job.statusText)
+                    JobStatusText(job: job)
                         .font(.system(size: 11))
                         .monospacedDigit()
                         .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
@@ -124,14 +128,24 @@ struct QueueRow: View {
 
     @ViewBuilder
     private var trailing: some View {
-        if job.isActive {
+        if case .recording = job.state {
+            Button {
+                model.stopRecording(job.id)
+            } label: {
+                Image(systemName: "stop.fill")
+            }
+            .buttonStyle(DroppyCircleButtonStyle(size: 28))
+            .help("Stop recording and keep it")
+        } else if job.isStopping {
+            EmptyView()
+        } else if job.isActive {
             Button {
                 model.cancelJob(job.id)
             } label: {
                 Image(systemName: "xmark")
             }
             .buttonStyle(DroppyCircleButtonStyle(size: 28))
-            .help(job.isTranscribing ? "Stop transcribing" : "Cancel download")
+            .help(job.cancelHelp)
         } else if let file = job.file {
             Button {
                 model.reveal(job.transcript ?? file)
@@ -153,9 +167,36 @@ struct QueueRow: View {
 
     private var glyphColor: Color {
         switch job.state {
+        case .recording: Color(nsColor: .systemRed)
         case .finished: Color(nsColor: .systemGreen)
         case .failed: Color(nsColor: .systemOrange)
         default: AdaptiveColors.notchSurfaceSecondaryText
         }
+    }
+}
+
+/// A Job's status line. A Recording's elapsed time ticks by itself, and a
+/// Scheduled recording's countdown once a minute, with nothing published by
+/// the model.
+struct JobStatusText: View {
+    let job: DownloadJob
+
+    var body: some View {
+        switch job.state {
+        case .recording(let since, _):
+            Text(job.statusText) + Text(" · ") + Text(timerInterval: since...Date.distantFuture, countsDown: false)
+        case .scheduled:
+            TimelineView(.everyMinute) { _ in Text(job.statusText) }
+        default:
+            Text(job.statusText)
+        }
+    }
+}
+
+extension DownloadJob {
+    /// The tooltip of the Cancel button.
+    var cancelHelp: String {
+        if isTranscribing { return "Stop transcribing" }
+        return isRecording ? "Cancel recording" : "Cancel download"
     }
 }

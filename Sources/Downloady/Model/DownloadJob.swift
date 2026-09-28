@@ -13,9 +13,14 @@ import Foundation
 /// file (and its transcript) are on disk.
 public struct DownloadJob: Identifiable, Equatable, Sendable {
     public enum State: Equatable, Sendable {
-        /// Waiting for the download lane.
+        /// Waiting for the download lane, or a Recording for the Recording Lane.
         case waiting
+        /// A Scheduled recording: holds no Lane until its broadcast is due.
+        case scheduled(Date)
         case downloading(fraction: Double, speed: String?, eta: String?)
+        /// A Recording under way since yt-dlp started, with the size of what
+        /// it has written, once there is any.
+        case recording(since: Date, bytes: Int64?)
         /// yt-dlp is merging, remuxing or extracting.
         case postProcessing
         /// The media is on disk; waiting for the transcription lane.
@@ -36,6 +41,9 @@ public struct DownloadJob: Identifiable, Equatable, Sendable {
     public let subtitleLanguage: String
     /// The media's length, for the transcription progress.
     public let duration: Double?
+    /// Whether this Job is a Recording: made from a Live stream, it runs in
+    /// the Recording Lane and ends with Stop.
+    public let isRecording: Bool
     /// The folder checked when the job was queued; `nil` is the current setting.
     public let folder: URL?
     public var state: State
@@ -51,6 +59,7 @@ public struct DownloadJob: Identifiable, Equatable, Sendable {
         options: DownloadOptions,
         subtitleLanguage: String = "en",
         duration: Double? = nil,
+        isRecording: Bool = false,
         folder: URL? = nil,
         state: State = .waiting,
         file: URL? = nil,
@@ -62,6 +71,7 @@ public struct DownloadJob: Identifiable, Equatable, Sendable {
         self.options = options
         self.subtitleLanguage = subtitleLanguage
         self.duration = duration
+        self.isRecording = isRecording
         self.folder = folder
         self.state = state
         self.file = file
@@ -84,6 +94,20 @@ public struct DownloadJob: Identifiable, Equatable, Sendable {
         }
     }
 
+    /// Whether the Job has written nothing yet: waiting for its Lane, or a
+    /// Scheduled recording.
+    /// A Recording that was Stopped and is finishing its file, a few
+    /// seconds. It cannot be cancelled: yt-dlp keeps the file whatever
+    /// happens, so a Cancel would only lose the row.
+    public var isStopping: Bool { isRecording && state == .postProcessing }
+
+    public var isWaiting: Bool {
+        switch state {
+        case .waiting, .scheduled: true
+        default: false
+        }
+    }
+
     /// Whether the transcription lane owns this job.
     public var isTranscribing: Bool {
         switch state {
@@ -96,7 +120,7 @@ public struct DownloadJob: Identifiable, Equatable, Sendable {
     /// measure yet.
     public var fraction: Double? {
         switch state {
-        case .waiting, .waitingForTranscript, .preparingTranscript: nil
+        case .waiting, .scheduled, .recording, .waitingForTranscript, .preparingTranscript: nil
         case .downloading(let fraction, _, _): fraction
         case .postProcessing: 1
         case .transcribing(let fraction): fraction
@@ -110,8 +134,13 @@ public struct DownloadJob: Identifiable, Equatable, Sendable {
         switch state {
         case .waiting:
             "Waiting"
+        case .scheduled(let start):
+            DownloadJob.startsIn(start.timeIntervalSinceNow)
         case .downloading(let fraction, let speed, let eta):
             DownloadJob.progressDetail(fraction: fraction, speed: speed, eta: eta)
+        case .recording(_, let bytes):
+            // The elapsed time is drawn beside it, by a view that ticks.
+            bytes.map { "Recording · \($0.formatted(.byteCount(style: .file)))" } ?? "Recording"
         case .postProcessing:
             "Finishing…"
         case .waitingForTranscript:
@@ -133,7 +162,7 @@ public struct DownloadJob: Identifiable, Equatable, Sendable {
         case .finished: "checkmark.circle.fill"
         case .failed: "exclamationmark.triangle.fill"
         case .waitingForTranscript, .preparingTranscript, .transcribing: "text.quote"
-        default: "arrow.down"
+        default: isRecording ? "dot.radiowaves.left.and.right" : "arrow.down"
         }
     }
 
@@ -163,6 +192,66 @@ public struct DownloadJob: Identifiable, Equatable, Sendable {
         return elapsed >= minimumInterval && wholePercent(percents.0) != wholePercent(percents.1)
     }
 
+    /// One Job per entry of `playlist`, in playlist order, all saved in
+    /// `folder`. An entry `PlaylistEntry.unavailableReason` rules out is
+    /// queued already failed, so the user sees why it is missing; an entry
+    /// with no web URL is left out.
+    public static func jobs(
+        for playlist: MediaInfo,
+        options: DownloadOptions,
+        subtitleLanguage: String,
+        folder: URL
+    ) -> [DownloadJob] {
+        (playlist.entries ?? []).compactMap { entry in
+            guard let url = entry.webURL else { return nil }
+            return DownloadJob(
+                url: url,
+                title: entry.title ?? url.absoluteString,
+                options: options,
+                subtitleLanguage: subtitleLanguage,
+                duration: entry.duration,
+                folder: folder,
+                state: entry.unavailableReason.map(State.failed) ?? .waiting
+            )
+        }
+    }
+
+    /// The subfolder of `parent` a Playlist's Jobs are saved in, named after
+    /// the Playlist with what the file system refuses taken out.
+    public static func playlistFolder(named title: String, in parent: URL) -> URL {
+        let name = title
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ":", with: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: ".")))
+        return parent.appendingPathComponent(name.isEmpty ? "Playlist" : String(name.prefix(200)), isDirectory: true)
+    }
+
+    /// Where a Recording starts: a Scheduled recording until `start`, then
+    /// (or at once, with no `start`) waiting for the Recording Lane, where
+    /// yt-dlp waits for a broadcast that is late.
+    public static func recordingState(start: Date?, now: Date = Date()) -> State {
+        if let start, start > now { return .scheduled(start) }
+        return .waiting
+    }
+
+    /// Whether a Recording in `state` may take the Recording Lane at `now`.
+    public static func isDue(_ state: State, at now: Date) -> Bool {
+        switch state {
+        case .waiting: true
+        case .scheduled(let start): start <= now
+        default: false
+        }
+    }
+
+    /// "Starts in 2 h 10 min", or "Waiting" once the start has passed.
+    public static func startsIn(_ interval: TimeInterval) -> String {
+        guard interval > 0 else { return "Waiting" }
+        let minutes = Int((interval / 60).rounded(.up))
+        let (days, hours, rest) = (minutes / 1440, minutes / 60 % 24, minutes % 60)
+        if days > 0 { return "Starts in \(days) d \(hours) h" }
+        return hours > 0 ? "Starts in \(hours) h \(rest) min" : "Starts in \(rest) min"
+    }
+
     public static func progressDetail(fraction: Double, speed: String?, eta: String?) -> String {
         var parts = [fraction.formatted(.percent.precision(.fractionLength(0)))]
         if let speed { parts.append(speed) }
@@ -176,12 +265,15 @@ public struct QueueSummary: Equatable, Sendable {
     /// Jobs still being worked on.
     public let activeCount: Int
     /// The job the notch is about: the running download, else the running
-    /// transcription.
+    /// transcription, else the running Recording.
     public let leading: DownloadJob?
+    /// Whether a Recording is running, beside whatever leads.
+    public let isRecording: Bool
 
-    public init(activeCount: Int, leading: DownloadJob?) {
+    public init(activeCount: Int, leading: DownloadJob?, isRecording: Bool = false) {
         self.activeCount = activeCount
         self.leading = leading
+        self.isRecording = isRecording
     }
 
     public var isActive: Bool { activeCount > 0 }
@@ -211,29 +303,64 @@ public struct QueueSummary: Equatable, Sendable {
             return fraction > 0 ? percent(fraction) : "Text"
         case .waiting:
             return percent(0)
-        case .finished, .failed:
+        case .scheduled, .recording, .finished, .failed:
+            // A Recording has no percentage: the wing shows the record circle.
             return ""
         }
     }
 
     /// Builds the summary from the queue. The running download wins the
-    /// notch; a transcription only gets it when no download is running.
+    /// notch; a transcription only gets it when no download is running, and
+    /// a Recording when nothing else is. A Scheduled recording is not
+    /// running: it does not hold the notch for hours before its broadcast.
     public init(jobs: [DownloadJob]) {
-        let active = jobs.filter(\.isActive)
+        let active = jobs.filter { $0.isActive && !$0.isScheduled }
+        let recording = active.first(where: { if case .recording = $0.state { return true } else { return false } })
         let leading = active.first(where: { if case .downloading = $0.state { return true } else { return false } })
-            ?? active.first(where: \.isDownloading)
+            ?? active.first(where: { $0.isDownloading && !$0.isRecording })
+            ?? active.first(where: { !$0.isRecording })
+            ?? recording
             ?? active.first
-        self.init(activeCount: active.count, leading: leading)
+        self.init(activeCount: active.count, leading: leading, isRecording: recording != nil)
+    }
+}
+
+extension DownloadJob {
+    var isScheduled: Bool {
+        if case .scheduled = state { true } else { false }
+    }
+
+    /// Whether this Job holds the download Lane, or for a Recording the
+    /// Recording Lane.
+    var holdsLane: Bool {
+        switch state {
+        case .downloading, .recording, .postProcessing: true
+        default: false
+        }
     }
 }
 
 extension Array where Element == DownloadJob {
-    /// The job the download lane should run next, if it is free.
+    /// The job the download lane should run next, if it is free. Recordings
+    /// have their own Lane and never hold this one.
     var nextToDownload: DownloadJob? {
-        guard !contains(where: { if case .downloading = $0.state { return true }
-                                 if case .postProcessing = $0.state { return true }
-                                 return false }) else { return nil }
-        return first { $0.state == .waiting }
+        guard !contains(where: { $0.holdsLane && !$0.isRecording }) else { return nil }
+        return first { $0.state == .waiting && !$0.isRecording }
+    }
+
+    /// The Recording the Recording Lane should run at `now`, if it is free:
+    /// the first one waiting, or Scheduled and due.
+    func nextToRecord(at now: Date) -> DownloadJob? {
+        guard !contains(where: { $0.holdsLane && $0.isRecording }) else { return nil }
+        return first { $0.isRecording && DownloadJob.isDue($0.state, at: now) }
+    }
+
+    /// The oldest finished rows past `limit`, which the queue lets go. Failed
+    /// rows stay until Clear finished, or a large Playlist's unavailable
+    /// entries would go as soon as they were queued.
+    func historyToTrim(limit: Int) -> Set<UUID> {
+        let finished = filter { $0.state == .finished }
+        return Set(finished.dropLast(limit).map(\.id))
     }
 
     /// The job the transcription lane should run next, if it is free.

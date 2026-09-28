@@ -18,10 +18,13 @@ struct DownloadyHarness: DropletHarnessApp {
         let droplet = DownloadyDroplet()
         // `DOWNLOADY_DEMO_QUEUE=1 droppykit run` fills the queue with jobs
         // that are not running, so the queue surface, the chip and the live
-        // activity can be looked at without downloading anything. Harness
-        // only: this target is never part of the bundle.
-        if ProcessInfo.processInfo.environment["DOWNLOADY_DEMO_QUEUE"] == "1" {
-            droplet.model.fillWithDemoJobs()
+        // activity can be looked at without downloading anything;
+        // `=recording` leaves only a running and a Scheduled recording.
+        // Harness only: this target is never part of the bundle.
+        switch ProcessInfo.processInfo.environment["DOWNLOADY_DEMO_QUEUE"] {
+        case "1": droplet.model.fillWithDemoJobs()
+        case "recording": droplet.model.fillWithDemoJobs(recordingsOnly: true)
+        default: break
         }
         return droplet
     }

@@ -80,8 +80,15 @@ public enum YtDlpCommand {
         return args
     }
 
+    /// `--flat-playlist`: a Playlist lists its entries without a Lookup of
+    /// each, seconds instead of a minute. A single video is unaffected, and
+    /// `--no-playlist` keeps `watch?v=X&list=Y` on video X.
+    /// `--ignore-no-formats-error`: a broadcast that has not begun has no
+    /// formats yet, and yt-dlp refuses it ("This live event will begin in
+    /// 10 hours") instead of describing it.
     public static func fetchInfo(_ url: URL, ffmpeg: URL?, deno: URL? = nil) -> [String] {
-        common(ffmpeg: ffmpeg, deno: deno) + ["-J", "--skip-download", "--", url.absoluteString]
+        common(ffmpeg: ffmpeg, deno: deno)
+            + ["-J", "--flat-playlist", "--skip-download", "--ignore-no-formats-error", "--", url.absoluteString]
     }
 
     /// The compatibility probe: every extractor except the generic one, and
@@ -113,11 +120,13 @@ public enum YtDlpCommand {
         folder: URL,
         ffmpeg: URL?,
         deno: URL? = nil,
-        subtitleLanguage: String = "en"
+        subtitleLanguage: String = "en",
+        recording: Bool = false
     ) -> [String] {
         common(ffmpeg: ffmpeg, deno: deno)
             + options.ytDlpArguments
             + options.subtitleArguments(language: subtitleLanguage)
+            + (recording ? recordingArguments : [])
             + [
                 "-o", folder.appendingPathComponent(outputTemplate).path,
                 "--progress-template", progressTemplate,
@@ -128,6 +137,14 @@ public enum YtDlpCommand {
                 "--", url.absoluteString,
             ]
     }
+
+    /// A Recording's extra arguments. `--wait-for-video`: a broadcast that is
+    /// late is retried every 15 to 60 seconds instead of failing.
+    /// `--no-hls-use-mpegts`: yt-dlp has ffmpeg write a live stream as
+    /// MPEG-TS, and skips its MP4 fix-up when it merged video and audio, so
+    /// the `.mp4` it leaves is one QuickTime refuses. As MP4, ffmpeg writes the
+    /// index when Stop tells it to quit.
+    static let recordingArguments = ["--wait-for-video", "15-60", "--no-hls-use-mpegts"]
 
     /// What one stdout line of a download says, if anything. A bare absolute
     /// path is the `--print after_move:filepath` line.
@@ -200,14 +217,14 @@ public enum YtDlpCommand {
     }
 
     /// The line worth showing from yt-dlp's stderr: the last `ERROR:` line,
-    /// else the last non-empty one.
+    /// else the last non-empty one, without its `ERROR:` or `WARNING:`.
     public static func errorMessage(fromStderr text: String) -> String {
         let lines = text.split(whereSeparator: \.isNewline)
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
         let line = lines.last(where: { $0.hasPrefix("ERROR:") }) ?? lines.last ?? ""
-        if line.hasPrefix("ERROR:") {
-            return line.dropFirst("ERROR:".count).trimmingCharacters(in: .whitespaces)
+        for prefix in ["ERROR:", "WARNING:"] where line.hasPrefix(prefix) {
+            return line.dropFirst(prefix.count).trimmingCharacters(in: .whitespaces)
         }
         return line
     }
@@ -232,6 +249,7 @@ final class ChildProcess: @unchecked Sendable {
     private let process = Process()
     private let lock = NSLock()
     private var terminationRequested = false
+    private var interruptRequested = false
 
     init(executable: URL, arguments: [String]) {
         process.executableURL = executable
@@ -247,6 +265,13 @@ final class ChildProcess: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return terminationRequested
+    }
+
+    /// Whether `interrupt()` stopped it: what it wrote is kept.
+    var wasInterrupted: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return interruptRequested
     }
 
     /// Starts the process on a background thread. `onLine` receives each
@@ -268,7 +293,8 @@ final class ChildProcess: @unchecked Sendable {
                 completion(.failure(error))
                 return
             }
-            if wasTerminated { signalTree(SIGKILL) }
+            // Stopped or cancelled before it ran: it has written nothing.
+            if wasTerminated || wasInterrupted { signalTree(SIGKILL) }
 
             let group = DispatchGroup()
             let errorBox = DataBox()
@@ -309,16 +335,34 @@ final class ChildProcess: @unchecked Sendable {
 
     /// SIGTERM to yt-dlp and whatever it spawned (ffmpeg), then SIGKILL two
     /// seconds later for anything still alive.
+    /// Does nothing after `interrupt()`: a Recording that is being stopped
+    /// is let finish its file.
     func terminate() {
         lock.lock()
-        let first = !terminationRequested
-        terminationRequested = true
+        let first = !terminationRequested && !interruptRequested
+        if !interruptRequested { terminationRequested = true }
         lock.unlock()
         // Not started yet: `start` kills it once `run()` returns. Exited: its
         // PID may belong to another process by now.
         guard first, process.isRunning else { return }
         signalTree(SIGTERM)
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) { [self] in
+            if process.isRunning { signalTree(SIGKILL) }
+        }
+    }
+
+    /// SIGINT to yt-dlp alone, which is how a Recording is Stopped: yt-dlp
+    /// sends ffmpeg `q`, ffmpeg finishes the file, and yt-dlp renames it and
+    /// exits 0. SIGTERM to ffmpeg would leave a `.part` instead. SIGKILL to
+    /// the tree follows only if it is still running `timeout` later.
+    func interrupt(timeout: TimeInterval = 30) {
+        lock.lock()
+        let first = !terminationRequested && !interruptRequested
+        if first { interruptRequested = true }
+        lock.unlock()
+        guard first, process.isRunning else { return }
+        kill(process.processIdentifier, SIGINT)
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout) { [self] in
             if process.isRunning { signalTree(SIGKILL) }
         }
     }
@@ -365,13 +409,15 @@ public final class YtDlpClient {
     private let tools: @MainActor () -> ToolStatus
     private let log: @MainActor (String) -> Void
     private var running: [ObjectIdentifier: ChildProcess] = [:]
+    /// The Recordings among them, which Stop interrupts instead.
+    private var recordings: Set<ObjectIdentifier> = []
 
     public init(tools: @escaping @MainActor () -> ToolStatus, log: @escaping @MainActor (String) -> Void) {
         self.tools = tools
         self.log = log
     }
 
-    /// `yt-dlp -J --no-playlist --skip-download <url>`, decoded.
+    /// `yt-dlp -J --no-playlist --flat-playlist --skip-download <url>`, decoded.
     public func fetchInfo(for url: URL) async throws -> MediaInfo {
         let (exit, data) = try await runToEnd(YtDlpCommand.fetchInfo(url, ffmpeg: tools().ffmpeg?.url, deno: tools().deno?.url))
         guard exit.status == 0 else {
@@ -381,8 +427,17 @@ public final class YtDlpClient {
             throw YtDlpError.processFailed(exitCode: exit.status, message: message)
         }
         let info = try await Self.decode(data)
-        if !info.isDedicatedExtractor, info.formats?.isEmpty ?? true {
-            throw YtDlpError.unsupportedURL
+        if let reason = info.nestedPlaylistReason {
+            throw YtDlpError.processFailed(exitCode: 0, message: reason)
+        }
+        // A Playlist has no formats of its own; its entries have them. Nor
+        // has a broadcast that has not begun.
+        if !info.isPlaylist, info.liveStatus != "is_upcoming", info.formats?.isEmpty ?? true {
+            guard info.isDedicatedExtractor else { throw YtDlpError.unsupportedURL }
+            // `--ignore-no-formats-error` made yt-dlp's reason a warning.
+            let message = YtDlpCommand.errorMessage(fromStderr: exit.stderr)
+            log("yt-dlp -J found no formats: \(message)")
+            throw YtDlpError.processFailed(exitCode: 0, message: message)
         }
         return info
     }
@@ -430,12 +485,14 @@ public final class YtDlpClient {
 
     /// Downloads `url` into `folder`. `subtitleLanguage` is the track
     /// yt-dlp is asked for when the options want subtitles. Cancelling the
-    /// consuming task terminates the process.
+    /// consuming task terminates the process. A `recording` is ended by
+    /// `stopRecordings()` instead, which keeps its file.
     public func download(
         _ url: URL,
         options: DownloadOptions,
         into folder: URL,
-        subtitleLanguage: String = "en"
+        subtitleLanguage: String = "en",
+        recording: Bool = false
     ) -> AsyncThrowingStream<DownloadEvent, Error> {
         guard let ytDlp = tools().ytDlp else {
             return AsyncThrowingStream { $0.finish(throwing: YtDlpError.toolsNotReady) }
@@ -446,10 +503,12 @@ public final class YtDlpClient {
             folder: folder,
             ffmpeg: tools().ffmpeg?.url,
             deno: tools().deno?.url,
-            subtitleLanguage: subtitleLanguage
+            subtitleLanguage: subtitleLanguage,
+            recording: recording
         )
         let child = ChildProcess(executable: ytDlp.url, arguments: arguments)
         let key = track(child)
+        if recording { recordings.insert(key) }
         let log = self.log
 
         return AsyncThrowingStream { continuation in
@@ -457,7 +516,10 @@ public final class YtDlpClient {
             let announced = AnnouncedFiles()
             continuation.onTermination = { [weak self] termination in
                 if case .cancelled = termination { child.terminate() }
-                Task { @MainActor in self?.running[key] = nil }
+                Task { @MainActor in
+                    self?.running[key] = nil
+                    self?.recordings.remove(key)
+                }
             }
             child.start(collectStdout: false, onLine: { line in
                 if let file = YtDlpCommand.writtenFile(forLine: line) { announced.append(file) }
@@ -473,6 +535,8 @@ public final class YtDlpClient {
                 // write a file back after it is removed.
                 if case .success(let (exit, _)) = result, !child.wasTerminated, exit.status == 0 {
                     // Finished: yt-dlp removed its own intermediates.
+                } else if child.wasInterrupted {
+                    // Stopped: what was recorded is kept, even half-written.
                 } else {
                     Self.removeLeftovers(of: announced.files)
                 }
@@ -515,10 +579,19 @@ public final class YtDlpClient {
         }
     }
 
-    /// Terminates every child process. Called from `deactivate()`.
+    /// Stops every running Recording: see `ChildProcess.interrupt()`. Each
+    /// one's stream then ends with its file, the way a finished download's
+    /// does. The Recording Lane runs one at a time, so this is Stop.
+    public func stopRecordings() {
+        for key in recordings { running[key]?.interrupt() }
+    }
+
+    /// Terminates every child process but the Recordings being stopped.
+    /// Called from `deactivate()`, after `stopRecordings()`.
     public func cancelAll() {
         for child in running.values { child.terminate() }
         running.removeAll()
+        recordings.removeAll()
     }
 
     private func track(_ child: ChildProcess) -> ObjectIdentifier {

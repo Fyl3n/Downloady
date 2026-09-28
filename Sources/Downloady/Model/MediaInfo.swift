@@ -43,6 +43,69 @@ public struct SubtitleTrack: Codable, Equatable, Sendable {
     }
 }
 
+/// One entry of a Playlist's `entries` in `yt-dlp --flat-playlist -J`
+/// output: only what a flat listing knows, no formats.
+public struct PlaylistEntry: Codable, Equatable, Sendable {
+    public let url: String?
+    public let title: String?
+    public let duration: Double?
+    /// `private`, `premium_only`, `subscriber_only`, `needs_auth`, … or `nil`.
+    public let availability: String?
+    /// `is_live`, `is_upcoming`, `was_live`, … or `nil`.
+    public let liveStatus: String?
+    /// `_type`: `"playlist"` for an entry that is itself one, like a
+    /// channel's Videos tab.
+    public let type: String?
+
+    enum CodingKeys: String, CodingKey {
+        case url, title, duration, availability
+        case liveStatus = "live_status"
+        case type = "_type"
+    }
+
+    public init(
+        url: String?,
+        title: String?,
+        duration: Double? = nil,
+        availability: String? = nil,
+        liveStatus: String? = nil,
+        type: String? = nil
+    ) {
+        self.url = url
+        self.title = title
+        self.duration = duration
+        self.availability = availability
+        self.liveStatus = liveStatus
+        self.type = type
+    }
+
+    /// The entry's link, when it is a web page. Some extractors list a bare
+    /// ID instead, which yt-dlp cannot download on its own.
+    public var webURL: URL? { url.flatMap(DownloadModel.webURL(from:)) }
+
+    /// Why this entry cannot be downloaded, in words, or `nil` when it can.
+    /// yt-dlp is never run for such an entry: its Job is queued failed.
+    public var unavailableReason: String? {
+        switch liveStatus {
+        case "is_live", "is_upcoming": return "Live stream: open it on its own to record it"
+        default: break
+        }
+        switch availability {
+        case "private": return "Private video"
+        case "premium_only": return "Premium only"
+        case "subscriber_only": return "Members only"
+        case "needs_auth": return "Needs signing in"
+        default: break
+        }
+        // YouTube lists what it hides under these titles, with no availability.
+        switch title {
+        case "[Private video]": return "Private video"
+        case "[Deleted video]": return "Deleted video"
+        default: return nil
+        }
+    }
+}
+
 /// The metadata the droplet needs about one URL.
 public struct MediaInfo: Codable, Equatable, Sendable {
     public let id: String
@@ -60,9 +123,23 @@ public struct MediaInfo: Codable, Equatable, Sendable {
     public let automaticCaptions: [String: [SubtitleTrack]]?
     /// `language`: the media's own language, when the extractor knows it.
     public let language: String?
+    /// `_type`: `"playlist"` for a Playlist, else `"video"` or absent.
+    public let type: String?
+    /// `playlist_count`: how many entries the site says the Playlist has.
+    public let playlistCount: Int?
+    /// A Playlist's entries, in order, as `--flat-playlist` lists them.
+    public let entries: [PlaylistEntry]?
+    /// `is_live`, `is_upcoming`, `post_live`, `was_live`, `not_live` or `nil`.
+    public let liveStatus: String?
+    /// When a Live stream begins (or began), in seconds since 1970.
+    public let releaseTimestamp: Double?
 
     enum CodingKeys: String, CodingKey {
-        case id, title, duration, thumbnail, formats, subtitles, language
+        case id, title, duration, thumbnail, formats, subtitles, language, entries
+        case type = "_type"
+        case liveStatus = "live_status"
+        case releaseTimestamp = "release_timestamp"
+        case playlistCount = "playlist_count"
         case extractorKey = "extractor_key"
         case webpageURL = "webpage_url"
         case automaticCaptions = "automatic_captions"
@@ -78,7 +155,12 @@ public struct MediaInfo: Codable, Equatable, Sendable {
         formats: [MediaFormat]?,
         subtitles: [String: [SubtitleTrack]]? = nil,
         automaticCaptions: [String: [SubtitleTrack]]? = nil,
-        language: String? = nil
+        language: String? = nil,
+        type: String? = nil,
+        playlistCount: Int? = nil,
+        entries: [PlaylistEntry]? = nil,
+        liveStatus: String? = nil,
+        releaseTimestamp: Double? = nil
     ) {
         self.id = id
         self.title = title
@@ -90,6 +172,41 @@ public struct MediaInfo: Codable, Equatable, Sendable {
         self.subtitles = subtitles
         self.automaticCaptions = automaticCaptions
         self.language = language
+        self.type = type
+        self.playlistCount = playlistCount
+        self.entries = entries
+        self.liveStatus = liveStatus
+        self.releaseTimestamp = releaseTimestamp
+    }
+
+    /// Whether the link is a Live stream, on now or not yet begun: its Job is
+    /// a Recording. A broadcast that has ended (`post_live`, `was_live`) is an
+    /// ordinary video.
+    public var isLiveStream: Bool { liveStatus == "is_live" || liveStatus == "is_upcoming" }
+
+    /// When a broadcast that has not begun is due, the start of its Scheduled
+    /// recording. `nil` for anything else, and for one with no date: a Live
+    /// stream on now reports when it began.
+    public var scheduledStart: Date? {
+        guard liveStatus == "is_upcoming" else { return nil }
+        return releaseTimestamp.map(Date.init(timeIntervalSince1970:))
+    }
+
+    /// Whether the link names several media: each entry becomes its own Job.
+    public var isPlaylist: Bool { type == "playlist" }
+
+    /// The entries that can be downloaded, the N of "Download N videos".
+    public var downloadableCount: Int {
+        (entries ?? []).count(where: { $0.unavailableReason == nil && $0.webURL != nil })
+    }
+
+    /// Why a Playlist offers nothing to download, when its entries are
+    /// playlists themselves: a channel's page lists its tabs, not videos.
+    public var nestedPlaylistReason: String? {
+        guard isPlaylist, downloadableCount == 0,
+              entries?.contains(where: { $0.type == "playlist" }) == true
+        else { return nil }
+        return "This page lists playlists: open one of them, like the channel's Videos tab"
     }
 
     /// Every language code with a subtitle track, written or automatic,

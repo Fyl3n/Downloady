@@ -155,7 +155,7 @@ struct FormatPickers: View {
             rule
             group("Text") {
                 Picker("Transcript", selection: options.transcript) {
-                    ForEach(TranscriptMode.allCases) { mode in
+                    ForEach(transcriptModes) { mode in
                         Label(mode.title, systemImage: "text.quote")
                             .tag(mode)
                             .disabled(!model.isTranscriptModeAvailable(mode, isDefault: inSettings))
@@ -176,6 +176,12 @@ struct FormatPickers: View {
         Rectangle()
             .fill(inSettings ? AdaptiveColors.overlayAuto(0.12) : AdaptiveColors.notchSurfaceCardFill)
             .frame(width: 1, height: Self.height)
+    }
+
+    /// Subtitles are hidden for a Live stream: its only track is live chat.
+    private var transcriptModes: [TranscriptMode] {
+        guard !inSettings, model.info?.isLiveStream == true else { return TranscriptMode.allCases }
+        return TranscriptMode.allCases.filter { $0 != .subtitles }
     }
 
     /// Why Transcribe is greyed out, on the item itself.
@@ -316,7 +322,15 @@ struct MediaCard: View {
                             .help(subtitle)
                     }
                     Spacer(minLength: 0)
-                    if let duration = model.info?.duration, duration > 0 {
+                    if let info = model.info, info.isPlaylist {
+                        let playlist = "Playlist · \(Self.videoCount(info.entries?.count ?? 0))"
+                        Text(playlist)
+                            .font(.system(size: 11))
+                            .monospacedDigit()
+                            .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+                            .lineLimit(1)
+                            .help(playlist)
+                    } else if let duration = model.info?.duration, duration > 0 {
                         Text(Self.formatDuration(duration))
                             .font(.system(size: 11))
                             .monospacedDigit()
@@ -358,6 +372,11 @@ struct MediaCard: View {
         }
     }
 
+    /// "1 video", "54 videos".
+    static func videoCount(_ count: Int) -> String {
+        count == 1 ? "1 video" : "\(count) videos"
+    }
+
     static func formatDuration(_ seconds: Double) -> String {
         let total = Int(seconds.rounded())
         let hours = total / 3600
@@ -382,6 +401,10 @@ struct MediaPreview: View {
             if model.phase == .fetchingInfo {
                 ProgressView()
                     .controlSize(.small)
+            } else if model.info?.isPlaylist == true {
+                Image(systemName: "list.bullet.rectangle")
+                    .font(.system(size: 14))
+                    .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
             } else if let thumbnail = Self.httpsURL(model.info?.thumbnail) {
                 switch model.previewImage(at: thumbnail) {
                 case .image(let image):
@@ -480,24 +503,37 @@ struct DownloadActionRow: View {
     private func progressRow(_ job: DownloadJob) -> some View {
         HStack(spacing: DroppySpacing.xsm) {
             VStack(alignment: .leading, spacing: DroppySpacing.xs) {
-                if !compact {
-                    Text(job.statusText)
+                if !compact || job.isRecording {
+                    JobStatusText(job: job)
                         .font(.system(size: 11))
                         .monospacedDigit()
                         .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
                         .lineLimit(1)
                 }
-                ToolProgressBar(fraction: job.fraction ?? 0, label: "Download progress")
+                // A Recording has no percentage to fill a bar with.
+                if !job.isRecording {
+                    ToolProgressBar(fraction: job.fraction ?? 0, label: "Download progress")
+                }
             }
             .help(job.statusText)
             queueButton
-            Button {
-                model.cancelJob(job.id)
-            } label: {
-                Image(systemName: "xmark")
+            if case .recording = job.state {
+                Button {
+                    model.stopRecording(job.id)
+                } label: {
+                    Image(systemName: "stop.fill")
+                }
+                .buttonStyle(DroppyCircleButtonStyle(size: 24))
+                .help("Stop recording and keep it")
+            } else if !job.isStopping {
+                Button {
+                    model.cancelJob(job.id)
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(DroppyCircleButtonStyle(size: 24))
+                .help(job.cancelHelp)
             }
-            .buttonStyle(DroppyCircleButtonStyle(size: 24))
-            .help(job.isTranscribing ? "Stop transcribing" : "Cancel download")
         }
     }
 
@@ -557,11 +593,21 @@ struct DownloadActionRow: View {
                 }
             }
             Button { model.startDownload() } label: {
-                Label("Download", systemImage: "arrow.down.circle")
+                Label(downloadTitle, systemImage: model.info?.isLiveStream == true ? "record.circle" : "arrow.down.circle")
             }
             .buttonStyle(DroppyAccentButtonStyle(size: .small))
             .disabled(!model.canDownload)
         }
+    }
+
+    /// "Download", or for a Playlist "Download N videos", N counting only
+    /// the entries that can be downloaded. The paired widget has room for
+    /// "N videos" only.
+    private var downloadTitle: String {
+        if model.info?.isLiveStream == true { return "Record" }
+        guard let info = model.info, info.isPlaylist else { return "Download" }
+        let count = MediaCard.videoCount(info.downloadableCount)
+        return compact ? count : "Download \(count)"
     }
 
     /// The way into the queue. It stays as long as the queue holds anything,

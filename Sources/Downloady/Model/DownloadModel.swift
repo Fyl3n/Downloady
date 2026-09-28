@@ -190,9 +190,13 @@ public final class DownloadModel: ObservableObject {
     private var browser: BrowserURLProvider?
     /// The download lane and the transcription lane: one job each, so a
     /// transcript can run while the next video downloads, and neither can
-    /// flood the Mac.
+    /// flood the Mac. The Recording Lane runs one Recording, beside them, so
+    /// a broadcast never holds the download Lane for hours.
     private var downloadTask: Task<Void, Never>?
     private var transcriptTask: Task<Void, Never>?
+    private var recordingTask: Task<Void, Never>?
+    /// Wakes the queue when the next Scheduled recording is due.
+    private var scheduleTask: Task<Void, Never>?
     /// Finished and failed jobs kept in the queue, oldest dropped first.
     static let historyLimit = 6
     private var browserIsWatching = false
@@ -231,6 +235,7 @@ public final class DownloadModel: ObservableObject {
     /// cancel.
     private var currentDownloadID: UUID?
     private var currentTranscriptID: UUID?
+    private var currentRecordingID: UUID?
     private var infoTask: Task<Void, Never>?
     /// The URL a quick action put in the bar, downloaded as soon as its
     /// lookup ends.
@@ -288,6 +293,14 @@ public final class DownloadModel: ObservableObject {
     func stop() {
         permissionTasks.values.forEach { $0.cancel() }
         permissionTasks = [:]
+        // A running Recording is Stopped, not cancelled: yt-dlp finishes its
+        // file on its own, within seconds, and nothing waits for it.
+        ytDlp?.stopRecordings()
+        recordingTask?.cancel()
+        recordingTask = nil
+        currentRecordingID = nil
+        scheduleTask?.cancel()
+        scheduleTask = nil
         downloadTask?.cancel()
         downloadTask = nil
         transcriptTask?.cancel()
@@ -466,11 +479,12 @@ public final class DownloadModel: ObservableObject {
     }
 
     /// Starts the download a quick action asked for, once its lookup ended
-    /// well. A failed lookup leaves the error in the bar and starts nothing.
+    /// well. A failed lookup leaves the error in the bar and starts nothing;
+    /// a Playlist stays in the form, whose button gives the count.
     private func startPendingDownload(after outcome: Result<MediaInfo, Error>, for text: String) {
         guard pendingDownload == text else { return }
         pendingDownload = nil
-        guard case .success = outcome else { return }
+        guard case .success(let info) = outcome, !info.isPlaylist else { return }
         startDownload()
     }
 
@@ -826,24 +840,50 @@ public final class DownloadModel: ObservableObject {
 
     /// Queues the URL in the bar and starts it when the lane is free. The
     /// form stays where it is: the shelf can close, the page can change, and
-    /// the job keeps running until it is done or cancelled.
+    /// the job keeps running until it is done or cancelled. A Playlist
+    /// queues one Job per entry, in a folder named after it.
     public func startDownload() {
         guard canDownload, let url = Self.webURL(from: urlText) else { return }
+        // Until the Lookup ends, the link may be a Playlist, which yt-dlp
+        // would download whole as one Job: start once it is known.
+        if phase == .fetchingInfo {
+            pendingDownload = urlText
+            return
+        }
         let folder = downloadFolder
         guard Self.isWritableFolder(folder) else {
             phase = .failed("Downloady cannot write to \(folder.path)")
             return
         }
-        let job = DownloadJob(
-            url: url,
-            title: info?.title ?? url.host() ?? url.absoluteString,
-            options: options,
-            subtitleLanguage: info?.subtitleLanguage(preferring: Self.preferredLanguages)
-                ?? Self.preferredLanguages.first ?? "en",
-            duration: info?.duration,
-            folder: folder
-        )
-        jobs.append(job)
+        if let info, info.isPlaylist {
+            let subfolder = DownloadJob.playlistFolder(named: info.title, in: folder)
+            do {
+                try FileManager.default.createDirectory(at: subfolder, withIntermediateDirectories: true)
+            } catch {
+                phase = .failed("Downloady cannot write to \(subfolder.path)")
+                return
+            }
+            // No entry has its own Lookup, so none knows its subtitle languages.
+            jobs += DownloadJob.jobs(
+                for: info,
+                options: options,
+                subtitleLanguage: Self.preferredLanguages.first ?? "en",
+                folder: subfolder
+            )
+        } else {
+            let isRecording = info?.isLiveStream == true
+            jobs.append(DownloadJob(
+                url: url,
+                title: info?.title ?? url.host() ?? url.absoluteString,
+                options: options,
+                subtitleLanguage: info?.subtitleLanguage(preferring: Self.preferredLanguages)
+                    ?? Self.preferredLanguages.first ?? "en",
+                duration: info?.duration,
+                isRecording: isRecording,
+                folder: folder,
+                state: isRecording ? DownloadJob.recordingState(start: info?.scheduledStart) : .waiting
+            ))
+        }
         trimHistory()
         // The next media starts on the default format again, and auto-fill
         // picks up the next page.
@@ -855,7 +895,7 @@ public final class DownloadModel: ObservableObject {
     /// Stops a job and takes its half-written files with it. A finished job
     /// just leaves the queue.
     public func cancelJob(_ id: UUID) {
-        guard let job = jobs[id: id] else { return }
+        guard let job = jobs[id: id], !job.isStopping else { return }
         if job.isDownloading, currentDownloadID == id {
             downloadTask?.cancel()
             downloadTask = nil
@@ -866,15 +906,40 @@ public final class DownloadModel: ObservableObject {
             transcriptTask = nil
             currentTranscriptID = nil
         }
+        if currentRecordingID == id {
+            recordingTask?.cancel()
+            recordingTask = nil
+            currentRecordingID = nil
+        }
         // A running download's files are removed by the client once yt-dlp
         // has exited; a waiting one has written nothing.
         jobs.removeAll { $0.id == id }
         pump()
     }
 
+    /// Stops a Recording and keeps what it recorded: the Job then finishes
+    /// like a download, with its file. One that has written nothing yet (its
+    /// broadcast has not begun) has nothing to keep, and is cancelled.
+    public func stopRecording(_ id: UUID) {
+        guard currentRecordingID == id, case .recording(_, let bytes) = jobs[id: id]?.state else { return }
+        guard bytes != nil else {
+            cancelJob(id)
+            return
+        }
+        update(id) { $0.state = .postProcessing }
+        ytDlp?.stopRecordings()
+    }
+
     /// Takes the finished and failed rows out of the queue.
     public func clearFinishedJobs() {
         jobs.removeAll { !$0.isActive }
+    }
+
+    /// Takes every Job still waiting for its Lane out of the queue, and the
+    /// Scheduled recordings. None has written anything yet.
+    public func cancelWaitingJobs() {
+        jobs.removeAll(where: \.isWaiting)
+        pump()
     }
 
     /// The job the URL in the bar belongs to, so a single download still
@@ -889,37 +954,73 @@ public final class DownloadModel: ObservableObject {
 
     public var hasActiveJobs: Bool { jobs.contains(where: \.isActive) }
 
-    /// Starts whatever each lane can take.
+    /// Starts whatever each lane can take, and wakes up again when the next
+    /// Scheduled recording is due.
     private func pump() {
+        let now = Date()
         if downloadTask == nil, let next = jobs.nextToDownload {
+            startDownloadTask(for: next)
+        }
+        if recordingTask == nil, let next = jobs.nextToRecord(at: now) {
             startDownloadTask(for: next)
         }
         if transcriptTask == nil, let next = jobs.nextToTranscribe {
             startTranscriptTask(for: next)
         }
+        scheduleTask?.cancel()
+        scheduleTask = nil
+        // Only starts still ahead: one already due waits for the Recording
+        // Lane, and the Recording that frees it pumps again. Waking for it
+        // would spin once a second for as long as that Recording runs.
+        let starts = jobs.compactMap { job -> Date? in
+            if case .scheduled(let start) = job.state, start > now { start } else { nil }
+        }
+        if let first = starts.min() {
+            scheduleTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(max(first.timeIntervalSinceNow, 0) + 1))
+                guard let self, !Task.isCancelled else { return }
+                self.scheduleTask = nil
+                self.pump()
+            }
+        }
     }
 
+    /// Runs `job` in its Lane: the download Lane, or the Recording Lane for a
+    /// Recording, which has no percentage but its elapsed time and size.
     private func startDownloadTask(for job: DownloadJob) {
         guard let ytDlp else { return }
         let id = job.id
-        currentDownloadID = id
-        update(id) { $0.state = .downloading(fraction: 0, speed: nil, eta: nil) }
+        let recording = job.isRecording
+        let started = Date()
+        if recording {
+            currentRecordingID = id
+            update(id) { $0.state = .recording(since: started, bytes: nil) }
+        } else {
+            currentDownloadID = id
+            update(id) { $0.state = .downloading(fraction: 0, speed: nil, eta: nil) }
+        }
         let events = ytDlp.download(
             job.url,
             options: job.options,
             into: job.folder ?? downloadFolder,
-            subtitleLanguage: job.subtitleLanguage
+            subtitleLanguage: job.subtitleLanguage,
+            recording: recording
         )
-        downloadTask = Task { [weak self] in
+        let task = Task { [weak self] in
             var finalFile: URL?
             var failure: Error?
+            var sizePoll: Task<Void, Never>?
+            defer { sizePoll?.cancel() }
             do {
                 for try await event in events {
                     guard let self, !Task.isCancelled else { return }
                     switch event {
-                    case .destination:
-                        break
+                    case .destination(let file):
+                        if recording, sizePoll == nil { sizePoll = self.pollSize(of: file, for: id, since: started) }
                     case .progress(let fraction, let speed, let eta):
+                        // ffmpeg records a live stream and prints nothing
+                        // yt-dlp reads, but for one last 100 % after Stop.
+                        guard !recording else { break }
                         self.updateProgress(id, to: .downloading(fraction: fraction, speed: speed, eta: eta))
                     case .postProcessing:
                         self.update(id) { $0.state = .postProcessing }
@@ -931,11 +1032,37 @@ public final class DownloadModel: ObservableObject {
                 failure = error
             }
             guard let self, !Task.isCancelled else { return }
-            self.downloadTask = nil
-            self.currentDownloadID = nil
+            if recording {
+                self.recordingTask = nil
+                self.currentRecordingID = nil
+            } else {
+                self.downloadTask = nil
+                self.currentDownloadID = nil
+            }
             self.downloadDidEnd(id, file: finalFile, failure: failure)
             self.pump()
         }
+        if recording { recordingTask = task } else { downloadTask = task }
+    }
+
+    /// Reads the size of the `.part` a Recording writes every few seconds,
+    /// while it is recording. No output line gives it.
+    private func pollSize(of file: URL, for id: UUID, since started: Date) -> Task<Void, Never> {
+        let part = file.appendingPathExtension("part")
+        return Task { [weak self] in
+            while !Task.isCancelled {
+                let bytes = await Self.fileSize(at: part)
+                guard let self, !Task.isCancelled else { return }
+                guard case .recording = self.jobs[id: id]?.state else { return }
+                if let bytes { self.update(id) { $0.state = .recording(since: started, bytes: bytes) } }
+                try? await Task.sleep(for: .seconds(2))
+            }
+        }
+    }
+
+    /// Off the main actor: a file system call can stall.
+    nonisolated private static func fileSize(at url: URL) async -> Int64? {
+        (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.int64Value
     }
 
     private func downloadDidEnd(_ id: UUID, file: URL?, failure: Error?) {
@@ -1063,10 +1190,8 @@ public final class DownloadModel: ObservableObject {
 
     /// Keeps the queue short: the oldest finished rows go first.
     private func trimHistory() {
-        var done = jobs.filter { !$0.isActive }
-        guard done.count > Self.historyLimit else { return }
-        done.removeLast(Self.historyLimit)
-        let stale = Set(done.map(\.id))
+        let stale = jobs.historyToTrim(limit: Self.historyLimit)
+        guard !stale.isEmpty else { return }
         jobs.removeAll { stale.contains($0.id) }
     }
 
@@ -1096,21 +1221,29 @@ public final class DownloadModel: ObservableObject {
 
     /// Fills the queue with jobs that are not running, for the harness. No
     /// process is started and no file is touched; nothing in the droplet
-    /// calls this.
-    public func fillWithDemoJobs() {
-        func demo(_ title: String, _ state: DownloadJob.State, transcript: TranscriptMode = .off) -> DownloadJob {
+    /// calls this. `recordingsOnly` leaves a running Recording and a
+    /// Scheduled one, so the notch shows a Recording on its own.
+    public func fillWithDemoJobs(recordingsOnly: Bool = false) {
+        func demo(_ title: String, _ state: DownloadJob.State, transcript: TranscriptMode = .off, recording: Bool = false) -> DownloadJob {
             DownloadJob(
                 url: URL(string: "https://www.youtube.com/watch?v=\(abs(title.hashValue))")!,
                 title: title,
                 options: DownloadOptions(transcript: transcript),
+                isRecording: recording,
                 state: state,
                 file: URL(fileURLWithPath: "/tmp/\(title).mp4")
             )
         }
-        jobs = [
+        let recordings = [
+            demo("Lofi radio, live", .recording(since: Date(timeIntervalSinceNow: -754), bytes: 48_300_000), recording: true),
+            demo("Launch coverage", .scheduled(Date(timeIntervalSinceNow: 7_800)), recording: true),
+        ]
+        jobs = recordingsOnly ? recordings : [
             demo("Chopin nocturnes, full album", .downloading(fraction: 0.62, speed: "4.20MiB/s", eta: "00:38")),
+            recordings[0],
             demo("WWDC keynote", .transcribing(fraction: 0.31), transcript: .transcribe),
             demo("How a lock works", .waiting),
+            recordings[1],
             demo("Interview with the architect", .finished, transcript: .subtitles),
         ]
     }
@@ -1636,8 +1769,13 @@ public final class DownloadModel: ObservableObject {
     public var canDownload: Bool {
         guard toolStatus.isReady, Self.webURL(from: urlText) != nil else { return false }
         guard currentJob?.isActive != true else { return false }
-        // A lookup still running is no reason to wait: yt-dlp resolves the
-        // URL itself, and the card says what is still loading.
+        // A lookup still running is no reason to disable it: a press then
+        // starts the download once the Lookup ends.
+        if let info, info.isPlaylist {
+            // A Playlist whose Jobs are still in the queue is already asked for.
+            let folder = DownloadJob.playlistFolder(named: info.title, in: downloadFolder)
+            if info.downloadableCount == 0 || jobs.contains(where: { $0.isActive && $0.folder == folder }) { return false }
+        }
         return phase != .unsupported
     }
 
@@ -1733,8 +1871,10 @@ public final class DownloadModel: ObservableObject {
         case .subtitles:
             // Settings knows no URL, and with no metadata yet the choice
             // stays open: yt-dlp answers when the link is looked up.
-            guard !isDefault, let info else { return true }
-            return info.hasSubtitles
+            // A Playlist's entries have no Lookup: each writes what it has.
+            guard !isDefault, let info, !info.isPlaylist else { return true }
+            // A Live stream's only track is its live chat.
+            return !info.isLiveStream && info.hasSubtitles
         case .transcribe:
             return canTranscribeLocally
         }
