@@ -33,10 +33,11 @@
     "name": "Fylen",
     "kind": "community",
     "url": "https://github.com/Fyl3n",
-    "avatar": "Creator.png"
+    "avatar": "Creator.png",
+    "gitlab": "Fyl3n"
   },
   "source": {
-    "repository": "https://github.com/Fyl3n/Downloady",
+    "repository": "https://gitlab.com/droppyformac1/droplets/-/tree/main/droplets/downloady",
     "license": "MIT"
   },
   "keywords": [

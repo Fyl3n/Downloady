@@ -47,11 +47,12 @@ Downloady's own copies live in its container under `tools/`, never inside the bu
 
 | Tool | Used for | Downloady's copy comes from | Verified against |
 | --- | --- | --- | --- |
-| yt-dlp | Downloading | [yt-dlp releases](https://github.com/yt-dlp/yt-dlp/releases) (`yt-dlp_macos.zip`) | `SHA2-256SUMS` |
-| ffmpeg | Merging streams, transcribing | [ffmpeg.martin-riedl.de](https://ffmpeg.martin-riedl.de), only when the Mac has none | The published checksum |
-| Deno | YouTube's JavaScript challenges | [Deno releases](https://github.com/denoland/deno/releases), only when the Mac has none | `.sha256sum` |
+| yt-dlp | Downloading | [yt-dlp releases](https://github.com/yt-dlp/yt-dlp/releases) (`yt-dlp_macos.zip`) | `SHA2-256SUMS`, signed with yt-dlp's release key (pinned in Downloady) |
+| ffmpeg | Merging streams, transcribing | [ffmpeg.martin-riedl.de](https://ffmpeg.martin-riedl.de), only when the Mac has none | Martin Riedl's Developer ID signature (Team `KU3N25YGLU`) |
+| Deno | YouTube's JavaScript challenges | [Deno releases](https://github.com/denoland/deno/releases), only when the Mac has none | Deno Land's Developer ID signature (Team `2H4KBF436B`) |
 
-A download whose checksum does not match is thrown away. When Settings opens,
+Only a key and Team IDs compiled into Downloady are trusted, never a file from
+the same server; a download that fails the check is thrown away before it runs. When Settings opens,
 Downloady checks for newer releases and offers **Update** for its own copies; for
 a copy on This Mac it shows the command to run (`brew upgrade`, `pipx upgrade`,
 `deno upgrade`) and copies it for you, never touching the tool itself.

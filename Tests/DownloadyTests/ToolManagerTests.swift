@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Testing
 @testable import Downloady
@@ -138,7 +139,8 @@ final class FakeFetcher: ToolFetching, @unchecked Sendable {
         defer { try? FileManager.default.removeItem(at: container) }
         let fetcher = FakeFetcher(files: [
             "yt-dlp_macos.zip": Data("not the real archive".utf8),
-            "SHA2-256SUMS": Data((String(repeating: "0", count: 64) + "  yt-dlp_macos.zip\n").utf8),
+            "SHA2-256SUMS": YtDlpRelease.sums,
+            "SHA2-256SUMS.sig": YtDlpRelease.signature,
         ])
         let manager = ToolManager(
             containerDirectory: container,
@@ -158,10 +160,7 @@ final class FakeFetcher: ToolFetching, @unchecked Sendable {
         let container = FileManager.default.temporaryDirectory.appendingPathComponent("downloady-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: container) }
         let archive = ToolManager.Configuration().denoArchiveName
-        let fetcher = FakeFetcher(files: [
-            archive: Data("not the real archive".utf8),
-            archive + ".sha256sum": Data((String(repeating: "0", count: 64) + "  \(archive)\n").utf8),
-        ])
+        let fetcher = FakeFetcher(files: [archive: try unsignedZip(named: "deno")])
         let manager = ToolManager(
             containerDirectory: container,
             fetcher: fetcher,
@@ -169,21 +168,45 @@ final class FakeFetcher: ToolFetching, @unchecked Sendable {
             log: { _ in }
         )
         #expect(manager.missingManagedTools() == [.deno])
-        await #expect(throws: ToolError.checksumMismatch(archive)) {
+        await #expect(throws: ToolError.signatureInvalid(archive)) {
             _ = try await manager.installMissing { _ in }
         }
+        #expect(manager.missingManagedTools() == [.deno])
+    }
+
+    @Test func aTamperedChecksumListIsRefused() async throws {
+        let container = FileManager.default.temporaryDirectory.appendingPathComponent("downloady-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: container) }
+        // The server swapped both files: the archive and its checksum.
+        let archive = Data("a replaced archive".utf8)
+        let digest = SHA256.hash(data: archive).map { String(format: "%02x", $0) }.joined()
+        let fetcher = FakeFetcher(files: [
+            "yt-dlp_macos.zip": archive,
+            "SHA2-256SUMS": Data("\(digest)  yt-dlp_macos.zip\n".utf8),
+            "SHA2-256SUMS.sig": YtDlpRelease.signature,
+        ])
+        let manager = ToolManager(
+            containerDirectory: container,
+            fetcher: fetcher,
+            choices: { ToolChoices(sources: [.ffmpeg: .custom, .deno: .custom], paths: [.ffmpeg: "/usr/bin/true"]) },
+            log: { _ in }
+        )
+        await #expect(throws: ToolError.signatureInvalid("SHA2-256SUMS")) {
+            _ = try await manager.installMissing { _ in }
+        }
+        #expect(await manager.resolve() == .missing)
     }
 
     @Test func aFailedYtDlpDoesNotStopTheHelpers() async throws {
         let container = FileManager.default.temporaryDirectory.appendingPathComponent("downloady-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: container) }
         let archive = ToolManager.Configuration().denoArchiveName
-        let bad = { (name: String) in Data((String(repeating: "0", count: 64) + "  \(name)\n").utf8) }
         let manager = ToolManager(
             containerDirectory: container,
             fetcher: FakeFetcher(files: [
-                "yt-dlp_macos.zip": Data("x".utf8), "SHA2-256SUMS": bad("yt-dlp_macos.zip"),
-                archive: Data("x".utf8), archive + ".sha256sum": bad(archive),
+                "yt-dlp_macos.zip": Data("x".utf8),
+                "SHA2-256SUMS": YtDlpRelease.sums, "SHA2-256SUMS.sig": YtDlpRelease.signature,
+                archive: try unsignedZip(named: "deno"),
             ]),
             choices: { ToolChoices(sources: [.ytDlp: .managed, .ffmpeg: .custom, .deno: .managed]) },
             log: { _ in }
@@ -193,7 +216,7 @@ final class FakeFetcher: ToolFetching, @unchecked Sendable {
         }
         // Deno was still tried, and both failures are on record.
         #expect(manager.installErrors[.ytDlp] != nil)
-        #expect(manager.installErrors[.deno] == ToolError.checksumMismatch(archive).localizedDescription)
+        #expect(manager.installErrors[.deno] == ToolError.signatureInvalid(archive).localizedDescription)
     }
 
     @Test func refusedNetworkFails() async {
@@ -330,5 +353,46 @@ final class FakeFetcher: ToolFetching, @unchecked Sendable {
             log: { _ in }
         )
         #expect(try await manager.homebrewVersion(of: .ffmpeg) == "9.0.2")
+    }
+}
+
+/// A zip holding one executable `name` that nobody signed.
+func unsignedZip(named name: String) throws -> Data {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("downloady-zip-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let content = folder.appendingPathComponent("content", isDirectory: true)
+    try FileManager.default.createDirectory(at: content, withIntermediateDirectories: true)
+    let executable = content.appendingPathComponent(name)
+    try Data("#!/bin/sh\necho replaced\n".utf8).write(to: executable)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+    let zip = folder.appendingPathComponent("archive.zip")
+    let ditto = try Process.run(URL(fileURLWithPath: "/usr/bin/ditto"), arguments: ["-c", "-k", content.path, zip.path])
+    ditto.waitUntilExit()
+    return try Data(contentsOf: zip)
+}
+
+@Suite struct ToolTrustTests {
+    @Test func theKeyIsYtDlpsSigningKey() throws {
+        #expect(try OpenPGP.fingerprint(OpenPGP.ytDlpKey) == "AC0CBBE6848D6A873464AF4E57CF65933B5A7581")
+    }
+
+    @Test func aReleaseChecksumListVerifies() throws {
+        #expect(try OpenPGP.verify(YtDlpRelease.sums, signature: YtDlpRelease.signature, armoredKey: OpenPGP.ytDlpKey))
+    }
+
+    @Test func oneChangedByteFailsVerification() throws {
+        var sums = YtDlpRelease.sums
+        sums[0] ^= 1
+        #expect(try !OpenPGP.verify(sums, signature: YtDlpRelease.signature, armoredKey: OpenPGP.ytDlpKey))
+    }
+
+    @Test func garbageIsNotASignature() {
+        #expect(throws: OpenPGP.VerifyError.self) {
+            try OpenPGP.verify(YtDlpRelease.sums, signature: Data("nope".utf8), armoredKey: OpenPGP.ytDlpKey)
+        }
+    }
+
+    @Test func appleSignedIsNotDenoSigned() {
+        #expect(!CodeSignature.isDeveloperID(URL(fileURLWithPath: "/bin/ls"), team: CodeSignature.denoTeam))
     }
 }

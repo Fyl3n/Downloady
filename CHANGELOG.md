@@ -14,4 +14,5 @@ First release.
 - Subtitles from the site, or a transcript made on this Mac (macOS 26).
 - Keyboard shortcuts for downloading the current tab or the pasted link.
 - yt-dlp, ffmpeg and Deno from your Mac or installed by Downloady, checked
-  against their published checksums.
+  against yt-dlp's pinned release key and ffmpeg's and Deno's Developer ID
+  signatures before they first run.

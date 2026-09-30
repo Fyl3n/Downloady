@@ -125,6 +125,7 @@ public enum ToolError: Error, Equatable, LocalizedError {
     case httpStatus(Int, String)
     case checksumMissing(String)
     case checksumMismatch(String)
+    case signatureInvalid(String)
     case unpackFailed(String)
     case releaseUnknown
     case nothingToCompare(String)
@@ -136,6 +137,7 @@ public enum ToolError: Error, Equatable, LocalizedError {
         case .httpStatus(let code, let name): "Download of \(name) failed (HTTP \(code))"
         case .checksumMissing(let name): "No checksum published for \(name)"
         case .checksumMismatch(let name): "Checksum mismatch for \(name)"
+        case .signatureInvalid(let name): "\(name) is not signed by its publisher"
         case .unpackFailed(let name): "Could not unpack \(name)"
         case .releaseUnknown: "Could not find the latest release"
         case .nothingToCompare(let name): "Nothing says which \(name) is current"
@@ -516,14 +518,17 @@ enum ToolProcess {
 
 // MARK: - Tool manager
 
+/// Every copy is verified against something compiled into the droplet
+/// before it is installed (see `ToolTrust.swift`):
 /// - yt-dlp: `yt-dlp_macos.zip` (onedir build, starts much faster than the
 ///   onefile `yt-dlp_macos`) from a GitHub release, verified against that
-///   release's `SHA2-256SUMS`, unpacked into `<container>/tools/yt-dlp/`.
+///   release's `SHA2-256SUMS` once its signature checks out against
+///   yt-dlp's pinned key, unpacked into `<container>/tools/yt-dlp/`.
 /// - ffmpeg: a static build for the running architecture from
-///   ffmpeg.martin-riedl.de, when set to Downloady's copy,
-///   verified against its published `.sha256`, at `<container>/tools/ffmpeg`.
+///   ffmpeg.martin-riedl.de, when set to Downloady's copy, signed with
+///   Martin Riedl's Developer ID, at `<container>/tools/ffmpeg`.
 /// - Deno: the release zip for the running architecture from GitHub, when set
-///   to Downloady's copy, verified against its `.sha256sum`, at
+///   to Downloady's copy, signed with Deno Land's Developer ID, at
 ///   `<container>/tools/deno`.
 @MainActor
 public final class ToolManager {
@@ -554,6 +559,14 @@ public final class ToolManager {
     static let ytDlpArchiveName = "yt-dlp_macos.zip"
     static let ytDlpExecutableName = "yt-dlp_macos"
     static let ytDlpSumsName = "SHA2-256SUMS"
+
+    /// What a download has to prove before it is installed.
+    enum Trust {
+        /// Its entry `name` in a checksum list signed with yt-dlp's key.
+        case signedSums(URL, signature: URL, name: String)
+        /// The unpacked executable's Developer ID signature from `team`.
+        case developerID(team: String)
+    }
 
     private let containerDirectory: URL
     private let configuration: Configuration
@@ -825,10 +838,10 @@ public final class ToolManager {
     /// Downloads, verifies and swaps in the onedir build of `tag`.
     func installYtDlp(tag: String, progress: @escaping @MainActor (Double) -> Void) async throws {
         let release = configuration.ytDlpDownloadBase.appendingPathComponent(tag, isDirectory: true)
+        let sums = release.appendingPathComponent(Self.ytDlpSumsName)
         try await install(
             release.appendingPathComponent(Self.ytDlpArchiveName),
-            sums: { _ in release.appendingPathComponent(Self.ytDlpSumsName) },
-            name: { _ in Self.ytDlpArchiveName },
+            trust: .signedSums(sums, signature: sums.appendingPathExtension("sig"), name: Self.ytDlpArchiveName),
             executable: Self.ytDlpExecutableName,
             swapsFolder: true,
             at: ytDlpDirectory,
@@ -842,9 +855,7 @@ public final class ToolManager {
     func installFFmpeg(progress: @escaping @MainActor (Double) -> Void) async throws {
         let archive = try await install(
             configuration.ffmpegArchive,
-            // Checksum of the exact build the redirect landed on.
-            sums: { URL(string: $0.finalURL.absoluteString + ".sha256")! },
-            name: { $0.finalURL.lastPathComponent },
+            trust: .developerID(team: CodeSignature.ffmpegTeam),
             executable: "ffmpeg",
             at: managedFFmpeg,
             progress: progress
@@ -862,8 +873,7 @@ public final class ToolManager {
         let release = configuration.denoDownloadBase.appendingPathComponent(tag, isDirectory: true)
         try await install(
             release.appendingPathComponent(name),
-            sums: { _ in release.appendingPathComponent(name + ".sha256sum") },
-            name: { _ in name },
+            trust: .developerID(team: CodeSignature.denoTeam),
             executable: "deno",
             at: managedDeno,
             progress: progress
@@ -872,15 +882,13 @@ public final class ToolManager {
         log("installed Deno \(tag)")
     }
 
-    /// Fetches `url` and the checksum list `sums` names for it, verifies the
-    /// archive against its entry `name`, unzips it, and swaps the unpacked
-    /// `executable` (or, with `swapsFolder`, the whole unpacked folder) in at
-    /// `destination`. Returns the fetched archive.
+    /// Fetches `url`, unzips it, checks it as `trust` says, and swaps the
+    /// unpacked `executable` (or, with `swapsFolder`, the whole unpacked
+    /// folder) in at `destination`. Returns the fetched archive.
     @discardableResult
     private func install(
         _ url: URL,
-        sums: (FetchedFile) -> URL,
-        name: (FetchedFile) -> String,
+        trust: Trust,
         executable: String,
         swapsFolder: Bool = false,
         at destination: URL,
@@ -891,20 +899,25 @@ public final class ToolManager {
 
         let report = Self.sendable(progress, scale: 0.95)
         let archive = try await fetcher.fetch(url, into: staging, progress: report)
-        let sumsFile = try await fetcher.fetch(sums(archive), into: staging) { _ in }
-        try Task.checkCancellation()
-
-        let name = name(archive)
-        try await Self.verify(archive.file, named: name, against: sumsFile.file)
+        let name = url.lastPathComponent
+        if case .signedSums(let sums, let signature, let entry) = trust {
+            let sumsFile = try await fetcher.fetch(sums, into: staging) { _ in }
+            let signatureFile = try await fetcher.fetch(signature, into: staging) { _ in }
+            try Task.checkCancellation()
+            try await Self.verify(archive.file, named: entry, against: sumsFile.file, signature: signatureFile.file)
+        }
         let unpacked = staging.appendingPathComponent("unpacked", isDirectory: true)
         try await Self.unzip(archive.file, into: unpacked, name: name)
         let binary = unpacked.appendingPathComponent(executable)
         guard fileManager.fileExists(atPath: binary.path) else { throw ToolError.unpackFailed(name) }
         try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: binary.path)
+        if case .developerID(let team) = trust {
+            let signed = await Task.detached(priority: .utility) { CodeSignature.isDeveloperID(binary, team: team) }.value
+            guard signed else { throw ToolError.signatureInvalid(name) }
+        }
         try Task.checkCancellation()
 
         try swapIn(swapsFolder ? unpacked : binary, at: destination)
-        await Self.clearQuarantine(destination)
         return archive
     }
 
@@ -941,9 +954,14 @@ public final class ToolManager {
         }
     }
 
-    nonisolated static func verify(_ file: URL, named name: String, against sumsFile: URL) async throws {
+    /// Checks `sumsFile` against yt-dlp's pinned key, then `file` against
+    /// its entry `name` in it.
+    nonisolated static func verify(_ file: URL, named name: String, against sumsFile: URL, signature: URL) async throws {
         try await Task.detached(priority: .utility) {
-            let text = try String(contentsOf: sumsFile, encoding: .utf8)
+            let sums = try Data(contentsOf: sumsFile)
+            let signed = try? OpenPGP.verify(sums, signature: Data(contentsOf: signature), armoredKey: OpenPGP.ytDlpKey)
+            guard signed == true else { throw ToolError.signatureInvalid("SHA2-256SUMS") }
+            let text = String(decoding: sums, as: UTF8.self)
             guard let expected = ChecksumList.parse(text)[name] else { throw ToolError.checksumMissing(name) }
             guard try ChecksumList.sha256(of: file) == expected else { throw ToolError.checksumMismatch(name) }
         }.value
@@ -956,15 +974,5 @@ public final class ToolManager {
             timeout: 300
         )
         guard result?.status == 0 else { throw ToolError.unpackFailed(name) }
-    }
-
-    /// Files fetched with URLSession carry no quarantine flag today; strip it
-    /// anyway in case a host ever adds one.
-    nonisolated static func clearQuarantine(_ url: URL) async {
-        _ = await ToolProcess.run(
-            URL(fileURLWithPath: "/usr/bin/xattr"),
-            ["-dr", "com.apple.quarantine", url.path],
-            timeout: 60
-        )
     }
 }
