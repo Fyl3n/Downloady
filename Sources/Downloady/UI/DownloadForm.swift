@@ -15,7 +15,8 @@ import SwiftUI
 /// or failed) and a paste button.
 struct URLBar: View {
     @ObservedObject var model: DownloadModel
-    /// The widget's card is the chip: the bar draws no fill of its own.
+    /// The widget draws the chip around the bar and its own button: the bar
+    /// draws no fill of its own.
     var isBare = false
     /// The paste button's diameter.
     var buttonSize: CGFloat = 20
@@ -296,15 +297,15 @@ struct AudioOnlySwitch: View {
 /// thumbnail, else the site's favicon, else a glyph), the title on the right
 /// and, under it, the audio-only switch when the media has video.
 ///
-/// With a `bottomRow` (the widget), the tile is bare: the caller's card is the
-/// surface, the preview fills the height it is given, the title takes up to
-/// two lines with the duration under it as the height allows, and the bottom
-/// row is pinned to the preview's bottom edge.
+/// With a `bottomRow` (the widget), the tile is bare, straight on the shelf:
+/// the preview fills the height it is given, the title takes up to two lines
+/// with the duration under it as the height allows, and the bottom row is
+/// pinned to the preview's bottom edge.
 struct MediaCard: View {
     @ObservedObject var model: DownloadModel
     var thumbnailSize = CGSize(width: 64, height: 36)
     var bottomRow: AnyView?
-    /// The preview's corners with a `bottomRow`: the widget's card's own.
+    /// The preview's corners with a `bottomRow`.
     var previewCornerRadius = DroppyRadius.sm
 
     /// The card around a thumbnail of `thumbnailSize`.

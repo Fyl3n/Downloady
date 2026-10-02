@@ -2,10 +2,10 @@
 //  DownloadyWidget.swift
 //  Downloady
 //
-//  The shelf widget: one card, the URL bar on top, a full-width rule, and
-//  under it the preview zone: the thumbnail, the title, and on the zone's
-//  bottom line the audio-only switch with the format ellipsis and Download
-//  at the trailing end. Paired drops the switch and Download's label.
+//  The shelf widget: the URL bar as a raised chip on top, and under it,
+//  straight on the shelf, the preview zone: the thumbnail, the title, and on
+//  the zone's bottom line the audio-only switch with the format ellipsis and
+//  Download at the trailing end. Paired drops the switch and Download's label.
 //  Branch on `context.isPaired`, never on a width.
 //
 
@@ -13,7 +13,7 @@ import DroppyKit
 import SwiftUI
 
 struct DownloadyWidget: View {
-    /// The card's corners, which the preview inside it repeats.
+    /// The preview's corners.
     static let cornerRadius = DroppyRadius.medium
     /// The URL bar's buttons.
     static let urlButtonSize: CGFloat = 24
@@ -40,28 +40,28 @@ struct DownloadyWidget: View {
                 }
             }
             .frame(height: Self.urlRowHeight)
-            Rectangle()
-                .fill(AdaptiveColors.notchSurfaceCardFill)
-                .frame(height: 1)
+            .background(
+                // The widget rectangle's own radius on every corner. It is
+                // more than half the chip's height, so the shape caps it and
+                // the chip reads as a pill.
+                RoundedRectangle(cornerRadius: DroppyShellMetrics.shelfWidgetCornerRadius, style: .continuous)
+                    .fill(AdaptiveColors.notchSurfaceCardFill)
+            )
             MediaCard(
                 model: model,
                 bottomRow: AnyView(bottomRow),
                 previewCornerRadius: Self.cornerRadius
             )
-            // A step tighter above and below than at the sides, so the
-            // title keeps a line beside the Download pill at 93pt.
-            .padding(.horizontal, DroppySpacing.sm)
+            // Flush with the chip's edges at the sides; a step above and
+            // below, so the title keeps a line beside the Download pill at
+            // 93pt.
             .padding(.vertical, DroppySpacing.xsm)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .background(
-            RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
-                .fill(AdaptiveColors.notchSurfaceCardFill)
-        )
-        // The island's inset clears its 34pt arc for a solo card that fills
-        // it. In a row the card sits between Droppy's own widgets, which draw
-        // flush to their rectangles, and the inset would shrink it by 12pt on
-        // every side.
+        // The island's inset clears its 34pt arc for a solo widget that fills
+        // it. In a row the widget sits between Droppy's own, which draw flush
+        // to their rectangles, and the inset would shrink it by 12pt on every
+        // side.
         .padding(context.isPaired ? EdgeInsets() : context.contentInsets)
     }
 
