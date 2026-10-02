@@ -17,6 +17,8 @@ struct URLBar: View {
     @ObservedObject var model: DownloadModel
     /// The widget's card is the chip: the bar draws no fill of its own.
     var isBare = false
+    /// The paste button's diameter.
+    var buttonSize: CGFloat = 20
 
     var body: some View {
         HStack(spacing: DroppySpacing.xsm) {
@@ -46,7 +48,7 @@ struct URLBar: View {
             } label: {
                 Image(systemName: "doc.on.clipboard")
             }
-            .buttonStyle(DroppyCircleButtonStyle(size: 20))
+            .buttonStyle(DroppyCircleButtonStyle(size: buttonSize))
             .help("Paste link")
         }
         .padding(.leading, DroppySpacing.sm)
@@ -295,12 +297,15 @@ struct AudioOnlySwitch: View {
 /// and, under it, the audio-only switch when the media has video.
 ///
 /// With a `bottomRow` (the widget), the tile is bare: the caller's card is the
-/// surface, the preview fills the height it is given, the duration sits
-/// under the title and the bottom row is pinned to the preview's bottom edge.
+/// surface, the preview fills the height it is given, the title takes up to
+/// two lines with the duration under it as the height allows, and the bottom
+/// row is pinned to the preview's bottom edge.
 struct MediaCard: View {
     @ObservedObject var model: DownloadModel
     var thumbnailSize = CGSize(width: 64, height: 36)
     var bottomRow: AnyView?
+    /// The preview's corners with a `bottomRow`: the widget's card's own.
+    var previewCornerRadius = DroppyRadius.sm
 
     /// The card around a thumbnail of `thumbnailSize`.
     static func height(thumbnailHeight: CGFloat) -> CGFloat {
@@ -315,11 +320,20 @@ struct MediaCard: View {
                 MediaPreview(model: model)
                     .aspectRatio(16 / 9, contentMode: .fit)
                     .frame(maxHeight: .infinity)
-                    .clipShape(RoundedRectangle(cornerRadius: DroppyRadius.sm, style: .continuous))
-                VStack(alignment: .leading, spacing: DroppyRadius.micro) {
-                    titleText
-                    detailText
-                    Spacer(minLength: 0)
+                    .clipShape(RoundedRectangle(cornerRadius: previewCornerRadius, style: .continuous))
+                VStack(alignment: .leading, spacing: 0) {
+                    // The first that fits the height above the bottom row:
+                    // two lines of title over the duration, two lines with
+                    // the duration beside them, then one line.
+                    ViewThatFits(in: .vertical) {
+                        VStack(alignment: .leading, spacing: DroppyRadius.micro) {
+                            titleText(lines: 2)
+                            detailText
+                        }
+                        titleBesideDetail(lines: 2)
+                        titleBesideDetail(lines: 1)
+                    }
+                    .frame(maxHeight: .infinity, alignment: .topLeading)
                     bottomRow
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
@@ -329,7 +343,7 @@ struct MediaCard: View {
             HStack(spacing: DroppySpacing.sm) {
                 preview
                 VStack(alignment: .leading, spacing: DroppyRadius.micro) {
-                    titleText
+                    titleText(lines: 1)
                     HStack(spacing: DroppySpacing.xsm) {
                         if model.mediaHasVideo {
                             AudioOnlySwitch(model: model)
@@ -363,12 +377,21 @@ struct MediaCard: View {
             .clipShape(RoundedRectangle(cornerRadius: DroppyRadius.sm, style: .continuous))
     }
 
-    private var titleText: some View {
+    private func titleText(lines: Int) -> some View {
         Text(title)
             .font(.system(size: 12, weight: .semibold))
             .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
-            .lineLimit(1)
+            .lineLimit(lines)
+            .truncationMode(.tail)
             .help(title)
+    }
+
+    private func titleBesideDetail(lines: Int) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: DroppySpacing.xsm) {
+            titleText(lines: lines)
+            Spacer(minLength: 0)
+            detailText
+        }
     }
 
     /// The playlist's count or the duration.

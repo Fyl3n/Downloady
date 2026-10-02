@@ -13,10 +13,12 @@ import DroppyKit
 import SwiftUI
 
 struct DownloadyWidget: View {
-    /// The URL bar: a 20pt button inside `DroppySpacing.xs` above and below.
-    static let urlRowHeight: CGFloat = 20 + 2 * DroppySpacing.xs
-    /// The preview zone's inset, on every side.
-    static let zoneInset = DroppySpacing.sm
+    /// The card's corners, which the preview inside it repeats.
+    static let cornerRadius = DroppyRadius.medium
+    /// The URL bar's buttons.
+    static let urlButtonSize: CGFloat = 24
+    /// The URL bar: its buttons inside `DroppySpacing.xs` above and below.
+    static let urlRowHeight: CGFloat = urlButtonSize + 2 * DroppySpacing.xs
 
     let droplet: DownloadyDroplet
     @ObservedObject var model: DownloadModel
@@ -25,14 +27,14 @@ struct DownloadyWidget: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: DroppySpacing.xs) {
-                URLBar(model: model, isBare: true)
+                URLBar(model: model, isBare: true, buttonSize: Self.urlButtonSize)
                 if !context.isPaired {
                     Button {
                         droplet.openDetail()
                     } label: {
                         Image(systemName: "arrow.up.left.and.arrow.down.right")
                     }
-                    .buttonStyle(DroppyCircleButtonStyle(size: 20))
+                    .buttonStyle(DroppyCircleButtonStyle(size: Self.urlButtonSize))
                     .help("Open Downloady")
                     .padding(.trailing, DroppySpacing.xs)
                 }
@@ -43,16 +45,24 @@ struct DownloadyWidget: View {
                 .frame(height: 1)
             MediaCard(
                 model: model,
-                bottomRow: AnyView(bottomRow)
+                bottomRow: AnyView(bottomRow),
+                previewCornerRadius: Self.cornerRadius
             )
-            .padding(Self.zoneInset)
+            // A step tighter above and below than at the sides, so the
+            // title keeps a line beside the Download pill at 93pt.
+            .padding(.horizontal, DroppySpacing.sm)
+            .padding(.vertical, DroppySpacing.xsm)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(
-            RoundedRectangle(cornerRadius: DroppyRadius.medium, style: .continuous)
+            RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
                 .fill(AdaptiveColors.notchSurfaceCardFill)
         )
-        .padding(context.contentInsets)
+        // The island's inset clears its 34pt arc for a solo card that fills
+        // it. In a row the card sits between Droppy's own widgets, which draw
+        // flush to their rectangles, and the inset would shrink it by 12pt on
+        // every side.
+        .padding(context.isPaired ? EdgeInsets() : context.contentInsets)
     }
 
     @ViewBuilder
