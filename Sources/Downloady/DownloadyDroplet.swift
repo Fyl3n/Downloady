@@ -205,15 +205,14 @@ extension DownloadyDroplet: ShelfWidgetProviding {
                 title: "Downloady",
                 systemImage: "arrow.down.circle",
                 layoutTraits: ShelfWidgetLayoutTraits(
-                    // Solo: URL bar, the three pickers in a row, the action row.
-                    // Paired: URL bar and the download button only.
+                    // Solo: the URL bar over the preview zone, its controls
+                    // on the zone's bottom line. Paired drops the audio
+                    // switch and Download's label.
                     preferredSoloWidth: 420,
                     preferredPairedWidth: 210,
-                    // The solo stack, measured: header, URL bar, pickers and
-                    // the action row with a DroppySpacing.sm step between
-                    // them. The paired composition drops the pickers and is
-                    // shorter, but the shelf gives a widget one height.
-                    contentHeight: .fixed(DownloadyWidget.soloContentHeight)
+                    // The height of Droppy's own widgets; the thumbnail
+                    // fills what the URL bar leaves of it.
+                    contentHeight: .standard
                 )
             )
         ]

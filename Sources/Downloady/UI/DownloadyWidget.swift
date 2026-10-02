@@ -2,64 +2,73 @@
 //  DownloadyWidget.swift
 //  Downloady
 //
-//  The shelf widget: URL bar, the media card, and the action row with
-//  Format… (which opens the takeover's pickers) and Download. Paired keeps
-//  the same stack with icon-only controls. Branch on `context.isPaired`,
-//  never on a width.
+//  The shelf widget: one card, the URL bar on top, a full-width rule, and
+//  under it the preview zone: the thumbnail, the title, and on the zone's
+//  bottom line the audio-only switch with the format ellipsis and Download
+//  at the trailing end. Paired drops the switch and Download's label.
+//  Branch on `context.isPaired`, never on a width.
 //
 
 import DroppyKit
 import SwiftUI
 
 struct DownloadyWidget: View {
-    /// The rectangle the widget asks the shelf for, measured off the stack:
-    /// the URL bar (28), the media card and the action row (25), with a
-    /// `DroppySpacing.sm` step between them, plus the step the first and last
-    /// row take away from the rounded corners.
-    static let soloContentHeight: CGFloat =
-        28 + MediaCard.height(thumbnailHeight: 36) + 25 + 2 * DroppySpacing.sm
-            + 2 * DroppySpacing.xs
+    /// The URL bar: a 20pt button inside `DroppySpacing.xs` above and below.
+    static let urlRowHeight: CGFloat = 20 + 2 * DroppySpacing.xs
+    /// The preview zone's inset, on every side.
+    static let zoneInset = DroppySpacing.sm
 
     let droplet: DownloadyDroplet
     @ObservedObject var model: DownloadModel
     let context: ShelfWidgetContext
 
     var body: some View {
-        VStack(alignment: .leading, spacing: DroppySpacing.sm) {
-            HStack(spacing: DroppySpacing.xsm) {
-                URLBar(model: model)
+        VStack(spacing: 0) {
+            HStack(spacing: DroppySpacing.xs) {
+                URLBar(model: model, isBare: true)
                 if !context.isPaired {
                     Button {
                         droplet.openDetail()
                     } label: {
                         Image(systemName: "arrow.up.left.and.arrow.down.right")
                     }
-                    .buttonStyle(DroppyCircleButtonStyle(size: 24))
+                    .buttonStyle(DroppyCircleButtonStyle(size: 20))
                     .help("Open Downloady")
+                    .padding(.trailing, DroppySpacing.xs)
                 }
             }
-            // The widget's rectangle has rounded corners, tightest as an
-            // island: the first and last row step away from the edge.
-            .padding(.top, DroppySpacing.xs)
-            MediaCard(model: model)
-            Spacer(minLength: 0)
-            if model.toolStatus.isReady {
-                DownloadActionRow(
-                    model: model,
-                    compact: context.isPaired,
-                    onOpenFormats: { [droplet] in droplet.openDetail() },
-                    onOpenQueue: { [droplet] in droplet.openQueue(fromDetail: false) }
-                )
-                .padding(.horizontal, DroppySpacing.lg)
-                .padding(.bottom, DroppySpacing.xs)
-            } else {
-                ToolInstallRow(model: model) { [droplet] in droplet.openSettings() }
-                    .padding(.horizontal, DroppySpacing.lg)
-                    .padding(.bottom, DroppySpacing.xs)
-            }
+            .frame(height: Self.urlRowHeight)
+            Rectangle()
+                .fill(AdaptiveColors.notchSurfaceCardFill)
+                .frame(height: 1)
+            MediaCard(
+                model: model,
+                bottomRow: AnyView(bottomRow)
+            )
+            .padding(Self.zoneInset)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(
+            RoundedRectangle(cornerRadius: DroppyRadius.medium, style: .continuous)
+                .fill(AdaptiveColors.notchSurfaceCardFill)
+        )
         .padding(context.contentInsets)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    @ViewBuilder
+    private var bottomRow: some View {
+        if model.toolStatus.isReady {
+            DownloadActionRow(
+                model: model,
+                compact: context.isPaired,
+                onOpenFormats: { [droplet] in droplet.openDetail() },
+                onOpenQueue: { [droplet] in droplet.openQueue(fromDetail: false) },
+                idleLeading: context.isPaired || !model.mediaHasVideo
+                    ? AnyView(EmptyView()) : AnyView(AudioOnlySwitch(model: model))
+            )
+        } else {
+            ToolInstallRow(model: model) { [droplet] in droplet.openSettings() }
+        }
     }
 }
 

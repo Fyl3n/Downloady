@@ -15,6 +15,8 @@ import SwiftUI
 /// or failed) and a paste button.
 struct URLBar: View {
     @ObservedObject var model: DownloadModel
+    /// The widget's card is the chip: the bar draws no fill of its own.
+    var isBare = false
 
     var body: some View {
         HStack(spacing: DroppySpacing.xsm) {
@@ -52,7 +54,7 @@ struct URLBar: View {
         .padding(.vertical, DroppySpacing.xs)
         .background(
             RoundedRectangle(cornerRadius: DroppyRadius.sm, style: .continuous)
-                .fill(AdaptiveColors.notchSurfaceCardFill)
+                .fill(isBare ? Color.clear : AdaptiveColors.notchSurfaceCardFill)
         )
         .animation(DroppyAnimation.state, value: model.autoFilledBrowser)
         .onAppear { model.formDidAppear() }
@@ -291,9 +293,14 @@ struct AudioOnlySwitch: View {
 /// The detected media as a raised tile: the preview on the left (the
 /// thumbnail, else the site's favicon, else a glyph), the title on the right
 /// and, under it, the audio-only switch when the media has video.
+///
+/// With a `bottomRow` (the widget), the tile is bare: the caller's card is the
+/// surface, the preview fills the height it is given, the duration sits
+/// under the title and the bottom row is pinned to the preview's bottom edge.
 struct MediaCard: View {
     @ObservedObject var model: DownloadModel
     var thumbnailSize = CGSize(width: 64, height: 36)
+    var bottomRow: AnyView?
 
     /// The card around a thumbnail of `thumbnailSize`.
     static func height(thumbnailHeight: CGFloat) -> CGFloat {
@@ -301,53 +308,86 @@ struct MediaCard: View {
     }
 
     var body: some View {
-        HStack(spacing: DroppySpacing.sm) {
-            MediaPreview(model: model)
-                .frame(width: thumbnailSize.width, height: thumbnailSize.height)
-                .clipShape(RoundedRectangle(cornerRadius: DroppyRadius.sm, style: .continuous))
-            VStack(alignment: .leading, spacing: DroppyRadius.micro) {
-                Text(title)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
-                    .lineLimit(1)
-                    .help(title)
-                HStack(spacing: DroppySpacing.xsm) {
-                    if model.mediaHasVideo {
-                        AudioOnlySwitch(model: model)
-                    } else if let subtitle {
-                        Text(subtitle)
-                            .font(.system(size: 11))
-                            .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
-                            .lineLimit(1)
-                            .help(subtitle)
-                    }
+        if let bottomRow {
+            HStack(alignment: .top, spacing: DroppySpacing.sm) {
+                // The whole height the host gives the zone, at 16:9: the
+                // shelf's larger sizes hand the widget a taller rectangle.
+                MediaPreview(model: model)
+                    .aspectRatio(16 / 9, contentMode: .fit)
+                    .frame(maxHeight: .infinity)
+                    .clipShape(RoundedRectangle(cornerRadius: DroppyRadius.sm, style: .continuous))
+                VStack(alignment: .leading, spacing: DroppyRadius.micro) {
+                    titleText
+                    detailText
                     Spacer(minLength: 0)
-                    if let info = model.info, info.isPlaylist {
-                        let playlist = "Playlist · \(Self.videoCount(info.entries?.count ?? 0))"
-                        Text(playlist)
-                            .font(.system(size: 11))
-                            .monospacedDigit()
-                            .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
-                            .lineLimit(1)
-                            .help(playlist)
-                    } else if let duration = model.info?.duration, duration > 0 {
-                        Text(Self.formatDuration(duration))
-                            .font(.system(size: 11))
-                            .monospacedDigit()
-                            .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
-                    }
+                    bottomRow
                 }
-                .frame(minHeight: 16)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .animation(DroppyAnimation.state, value: model.info)
+        } else {
+            HStack(spacing: DroppySpacing.sm) {
+                preview
+                VStack(alignment: .leading, spacing: DroppyRadius.micro) {
+                    titleText
+                    HStack(spacing: DroppySpacing.xsm) {
+                        if model.mediaHasVideo {
+                            AudioOnlySwitch(model: model)
+                        } else if let subtitle {
+                            Text(subtitle)
+                                .font(.system(size: 11))
+                                .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+                                .lineLimit(1)
+                                .help(subtitle)
+                        }
+                        Spacer(minLength: 0)
+                        detailText
+                    }
+                    .frame(minHeight: 16)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(DroppySpacing.xsm)
+            .frame(height: Self.height(thumbnailHeight: thumbnailSize.height))
+            .background(
+                RoundedRectangle(cornerRadius: DroppyRadius.small, style: .continuous)
+                    .fill(AdaptiveColors.notchSurfaceCardFill)
+            )
+            .animation(DroppyAnimation.state, value: model.info)
         }
-        .padding(DroppySpacing.xsm)
-        .frame(height: Self.height(thumbnailHeight: thumbnailSize.height))
-        .background(
-            RoundedRectangle(cornerRadius: DroppyRadius.small, style: .continuous)
-                .fill(AdaptiveColors.notchSurfaceCardFill)
-        )
-        .animation(DroppyAnimation.state, value: model.info)
+    }
+
+    private var preview: some View {
+        MediaPreview(model: model)
+            .frame(width: thumbnailSize.width, height: thumbnailSize.height)
+            .clipShape(RoundedRectangle(cornerRadius: DroppyRadius.sm, style: .continuous))
+    }
+
+    private var titleText: some View {
+        Text(title)
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
+            .lineLimit(1)
+            .help(title)
+    }
+
+    /// The playlist's count or the duration.
+    @ViewBuilder
+    private var detailText: some View {
+        if let info = model.info, info.isPlaylist {
+            let playlist = "Playlist · \(MediaCard.videoCount(info.entries?.count ?? 0))"
+            Text(playlist)
+                .font(.system(size: 11))
+                .monospacedDigit()
+                .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+                .lineLimit(1)
+                .help(playlist)
+        } else if let duration = model.info?.duration, duration > 0 {
+            Text(MediaCard.formatDuration(duration))
+                .font(.system(size: 11))
+                .monospacedDigit()
+                .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+        }
     }
 
     private var title: String {
@@ -471,6 +511,9 @@ struct DownloadActionRow: View {
     var onOpenFormats: (() -> Void)?
     /// Opens the queue surface.
     var onOpenQueue: (() -> Void)?
+    /// The widget: Format… is the bare ellipsis, and before the download
+    /// starts this stands where the format summary would.
+    var idleLeading: AnyView?
 
     private var job: DownloadJob? { model.currentJob }
 
@@ -561,7 +604,9 @@ struct DownloadActionRow: View {
 
     private func idleRow(text: String, icon: String?, tip: String?) -> some View {
         HStack(spacing: DroppySpacing.xsm) {
-            if !compact {
+            if !compact, icon == nil, let idleLeading {
+                idleLeading
+            } else if !compact {
                 if let icon {
                     Image(systemName: icon)
                         .font(.system(size: 11))
@@ -580,7 +625,7 @@ struct DownloadActionRow: View {
             Spacer(minLength: 0)
             queueButton
             if let onOpenFormats {
-                if compact {
+                if compact || idleLeading != nil {
                     Button(action: onOpenFormats) {
                         Image(systemName: "ellipsis.circle")
                     }
@@ -592,21 +637,33 @@ struct DownloadActionRow: View {
                 }
             }
             Button { model.startDownload() } label: {
-                Label(downloadTitle, systemImage: model.info?.isLiveStream == true ? "record.circle" : "arrow.down.circle")
+                let icon = model.info?.isLiveStream == true ? "record.circle" : "arrow.down.circle"
+                // Paired: the thumbnail takes the room the title had.
+                if compact {
+                    // A larger glyph in the label's own box, so the pill
+                    // keeps the size of a `.small` button.
+                    Image(systemName: icon)
+                        .font(.system(size: 17, weight: .semibold))
+                        .frame(width: 15, height: 15)
+                        .accessibilityLabel(downloadTitle)
+                } else {
+                    Label(downloadTitle, systemImage: icon)
+                }
             }
             .buttonStyle(DroppyAccentButtonStyle(size: .small))
+            .help(downloadTitle)
             .disabled(!model.canDownload)
         }
     }
 
     /// "Download", or for a Playlist "Download N videos", N counting only
-    /// the entries that can be downloaded. The paired widget has room for
-    /// "N videos" only.
+    /// the entries that can be downloaded. The paired widget shows it as the
+    /// button's tip.
     private var downloadTitle: String {
         if model.info?.isLiveStream == true { return "Record" }
         guard let info = model.info, info.isPlaylist else { return "Download" }
         let count = MediaCard.videoCount(info.downloadableCount)
-        return compact ? count : "Download \(count)"
+        return "Download \(count)"
     }
 
     /// The way into the queue. It stays as long as the queue holds anything,
